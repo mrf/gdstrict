@@ -5,6 +5,7 @@ members = [
     "crates/gdstrict-strict",
     "crates/gdstrict-format",
     "crates/gdstrict-cli",
+    "crates/gdstrict-lint",
 ]
 
 [workspace.package]
