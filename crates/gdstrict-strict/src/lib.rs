@@ -36,6 +36,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod config;
+pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,

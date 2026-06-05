@@ -1,0 +1,8 @@
+# Example gdstrict severity profile for the strict_project fixture.
+# The `strict` preset makes the strict-typing warning family hard errors:
+#   UNTYPED_DECLARATION, INFERRED_DECLARATION, UNSAFE_* family, RETURN_VALUE_DISCARDED.
+preset = "strict"
+
+[warnings]
+# Per-code overrides take precedence over the preset.
+INTEGER_DIVISION = "off"
