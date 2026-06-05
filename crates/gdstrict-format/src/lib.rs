@@ -3,9 +3,12 @@
 //! Phase 0 contained only the layout engine (`doc`). Phase 1 adds CST -> Doc
 //! lowering (`lower`) on top of `gdstrict-syntax`: parse source to a tree-sitter
 //! CST, walk it emitting the document IR, then render at the target line width.
+//! Comment and blank-line preservation is handled by `trivia`, which the block
+//! lowering uses to attach comments to the statements they belong to.
 
 pub mod doc;
 pub mod lower;
+pub mod trivia;
 
 /// Default line width (Godot style guide / black default).
 pub const DEFAULT_WIDTH: usize = 100;
@@ -172,6 +175,109 @@ func f(n: int) -> void:
         // re-parse and be idempotent.
         check_roundtrip(
             "var hp := 100:\n\tget:\n\t\treturn hp\n\tset(value):\n\t\thp = value\n",
+        );
+    }
+
+    // --- comment & blank-line trivia (integration over the real lowering) ----
+    //
+    // These drive comments through the full `format()` — real expression layout,
+    // not a verbatim stand-in — and assert each comment survives, lands in the
+    // right place, and the output re-parses (`check_roundtrip`). This is the
+    // gdformat `CommentPersistenceViolation` regression surface.
+
+    #[test]
+    fn leading_comment_on_func_survives() {
+        // The comment stays on its own line directly above the func, and the func
+        // body is still reformatted (`print( x )` -> `print(x)`).
+        let out = check_roundtrip("# explains the function\nfunc foo():\n\tprint( x )\n");
+        let lines: Vec<&str> = out.lines().collect();
+        let ci = lines.iter().position(|l| l.contains("# explains")).unwrap();
+        assert!(
+            lines[ci + 1].starts_with("func foo"),
+            "leading comment must sit directly above the func; got:\n{out}"
+        );
+        assert!(out.contains("    print(x)"), "body must be reformatted; got:\n{out}");
+    }
+
+    #[test]
+    fn inline_comment_stays_on_statement_line_and_expr_is_formatted() {
+        // The inline comment must NOT be relocated to its own line, and the
+        // statement it trails is still normalized (`var x:int=5`).
+        let out = check_roundtrip("func foo():\n\tvar x:int=5  # the counter\n");
+        let line = out.lines().find(|l| l.contains("var x")).expect("var line present");
+        assert_eq!(
+            line, "    var x: int = 5  # the counter",
+            "inline comment must stay inline with the reformatted statement; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn doc_comment_block_survives_in_order() {
+        let out = check_roundtrip("## A documented class.\n## Second doc line.\nclass_name Foo\n");
+        let a = out.find("## A documented").expect("doc line 1 present");
+        let b = out.find("## Second doc").expect("doc line 2 present");
+        let c = out.find("class_name Foo").expect("decl present");
+        assert!(a < b && b < c, "doc block order must be preserved; got:\n{out}");
+    }
+
+    #[test]
+    fn blank_run_between_members_collapses_with_comment_kept() {
+        // A run of blanks between two members collapses to one, and a leading
+        // comment on the second member is preserved across the gap.
+        let out = check_roundtrip("var a:=1\n\n\n\n# about b\nvar b:=2\n");
+        assert_eq!(
+            out, "var a := 1\n\n# about b\nvar b := 2\n",
+            "blank run should collapse to one and keep the comment; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn in_body_comment_keeps_indentation() {
+        let out = check_roundtrip("func foo():\n\t# step one\n\tvar x:=1\n");
+        let lines: Vec<&str> = out.lines().collect();
+        let ci = lines.iter().position(|l| l.contains("# step one")).unwrap();
+        assert!(
+            lines[ci].starts_with("    #"),
+            "in-body comment must be indented to the block; got:\n{out}"
+        );
+        assert!(lines[ci + 1].contains("var x := 1"));
+    }
+
+    #[test]
+    fn dangling_comment_at_end_of_body_survives() {
+        let out = check_roundtrip("func foo():\n\tpass\n\t# trailing block comment\n");
+        assert!(
+            out.contains("# trailing block comment"),
+            "dangling comment must not be dropped; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mixed_trivia_round_trips_and_keeps_every_comment() {
+        let src = "\
+# top of file
+extends Node
+
+
+## Doc for greeting.
+func greet(name):
+\t# build the message
+\tvar msg=\"hi\"  # placeholder
+\tprint( msg )
+";
+        let out = check_roundtrip(src);
+        for needle in [
+            "# top of file",
+            "## Doc for greeting.",
+            "# build the message",
+            "# placeholder",
+        ] {
+            assert!(out.contains(needle), "lost {needle:?} in:\n{out}");
+        }
+        let msg_line = out.lines().find(|l| l.contains("var msg")).unwrap();
+        assert_eq!(
+            msg_line, "    var msg = \"hi\"  # placeholder",
+            "inline comment stays inline and the assignment is normalized; got:\n{out}"
         );
     }
 
