@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The gdstrict formatter: document IR + width-aware renderer (the black engine)"
+
+[dependencies]
+gdstrict-syntax = { path = "../gdstrict-syntax" }
+tree-sitter = { workspace = true }
