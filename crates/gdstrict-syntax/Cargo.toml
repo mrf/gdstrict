@@ -1,0 +1,13 @@
+[package]
+name = "gdstrict-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tree-sitter-gdscript wrapper: source -> CST, error recovery, trivia"
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-gdscript = "6.1"
+
+[dev-dependencies]

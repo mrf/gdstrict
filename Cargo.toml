@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gdstrict-syntax",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mrf/godot-linter"
+
+[workspace.dependencies]
+tree-sitter = "0.24"
