@@ -1,0 +1,10 @@
+; Minimal Godot project so `godot --headless --check-only` can resolve the
+; class_name cross-references in the vendored stagehand_core corpus. This file
+; exists only to give the acceptance check-only run project context; it is not
+; a runnable game.
+config_version=5
+
+[application]
+
+config/name="gdstrict acceptance corpus"
+config/features=PackedStringArray("4.6")
