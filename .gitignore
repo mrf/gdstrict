@@ -1,0 +1,18 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# gdstrict scratch
+/fixtures/**/*.tmp.gd
+
+# Godot (test fixtures / sample projects)
+.godot/
+*.import
+export_presets.cfg
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
