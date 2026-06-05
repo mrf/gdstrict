@@ -19,6 +19,19 @@
 //! SCRIPT ERROR: Parse Error: <message>
 //!           at: GDScript::reload (res://path.gd:LINE)
 //! ```
+//!
+//! ## Injected warning settings (do not trust project.godot)
+//!
+//! Godot only emits the unsafe/untyped warning family when it is enabled under
+//! `[debug] gdscript/warnings/*` in `project.godot` — and that family is off by
+//! default. A target project may have it disabled (or actively set to `0`), which
+//! would silently suppress the very diagnostics gdstrict exists to enforce.
+//!
+//! So gdstrict does not trust the target's config: before each check it writes a
+//! Godot `override.cfg` at the project root forcing its required warning set on.
+//! Godot reads `override.cfg` on top of `project.godot`, so this wins regardless of
+//! the project's settings without mutating `project.godot` itself. The file is
+//! restored (or removed) on drop, including on early return. See [`StrictWarnings`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,15 +67,105 @@ pub fn find_godot() -> Option<PathBuf> {
     Some(PathBuf::from("godot"))
 }
 
+/// GDScript warning keys gdstrict forces on (value `1` = "Warn") regardless of the
+/// target project's config, so the analyzer always emits the unsafe/untyped family.
+///
+/// gdstrict applies its own severity mapping downstream, so we inject these as plain
+/// warnings (`1`) and decide error-vs-warn ourselves rather than letting Godot fail
+/// the parse via `2` ("Error"). Version-gate this set alongside [`classify_warning`].
+const STRICT_WARNINGS: &[&str] = &[
+    "untyped_declaration",
+    "inferred_declaration",
+    "unsafe_property_access",
+    "unsafe_method_access",
+    "unsafe_cast",
+    "unsafe_call_argument",
+    "return_value_discarded",
+    "integer_division",
+    "unused_variable",
+    "shadowed_variable",
+];
+
+/// Render the `override.cfg` contents that force [`STRICT_WARNINGS`] on.
+fn strict_override_cfg() -> String {
+    let mut s = String::from(
+        "; Written by gdstrict: strict warning settings injected so the GDScript\n\
+         ; analyzer emits the unsafe/untyped family regardless of the target\n\
+         ; project's [debug] config. Auto-removed after the check.\n\
+         [debug]\n\n\
+         gdscript/warnings/enable=true\n",
+    );
+    for w in STRICT_WARNINGS {
+        s.push_str("gdscript/warnings/");
+        s.push_str(w);
+        s.push_str("=1\n");
+    }
+    s
+}
+
+/// RAII guard that installs gdstrict's [`STRICT_WARNINGS`] as a Godot `override.cfg`
+/// at the project root for the duration of a check, then restores the prior state on
+/// drop. Because Godot reads `override.cfg` on top of `project.godot`, this forces the
+/// warning set on without trusting — or mutating — the target's config.
+///
+/// If an `override.cfg` already exists it is backed up in memory and rewritten on
+/// drop; otherwise the file we created is removed. Drop runs on early return too, so
+/// the project is left as we found it even when a Godot pass errors.
+///
+/// Concurrency caveat: the override lives at the shared project root, so two checks of
+/// the same project at once race on the file. The current API is one script per call;
+/// the Phase 2 concurrent worker pool must serialize the install or isolate per check.
+struct StrictWarnings {
+    path: PathBuf,
+    /// Prior `override.cfg` bytes to restore, or `None` if we created it fresh.
+    prior: Option<Vec<u8>>,
+}
+
+impl StrictWarnings {
+    /// Write the strict `override.cfg` into `project_dir`, capturing any prior file.
+    fn install(project_dir: &Path) -> std::io::Result<Self> {
+        let path = project_dir.join("override.cfg");
+        let prior = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        std::fs::write(&path, strict_override_cfg())?;
+        Ok(Self { path, prior })
+    }
+}
+
+impl Drop for StrictWarnings {
+    fn drop(&mut self) {
+        // Best-effort restore; failures here must not mask the check's result.
+        match &self.prior {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
 /// Run the full strict check on a single script within a project.
 ///
 /// `project_dir` is the dir containing project.godot; `script_rel` is the script
 /// path relative to it (as Godot expects after `--path`).
+///
+/// gdstrict's required warning set is injected via an `override.cfg` for the duration
+/// of the check (see [`StrictWarnings`]), so unsafe/untyped warnings are emitted
+/// regardless of what the target `project.godot` enables or disables.
 pub fn check_script(
     godot: &Path,
     project_dir: &Path,
     script_rel: &str,
 ) -> std::io::Result<Vec<Diagnostic>> {
+    // Force our warning settings on for both passes; restored when `_warnings` drops
+    // (including on the `?` early returns below).
+    let _warnings = StrictWarnings::install(project_dir)?;
+
     // Pass 1: errors (no --debug — safe).
     let errs = run(godot, project_dir, script_rel, false)?;
     let mut diags = parse_diagnostics(&errs);
@@ -198,6 +301,83 @@ mod tests {
         assert_eq!(d[0].line, 4);
     }
 
+    #[test]
+    fn override_cfg_lists_strict_warnings_as_warn() {
+        let cfg = strict_override_cfg();
+        assert!(cfg.contains("[debug]"));
+        assert!(cfg.contains("gdscript/warnings/enable=true"));
+        // Every strict key is forced to 1 ("Warn"), never 0/2.
+        for w in STRICT_WARNINGS {
+            assert!(
+                cfg.contains(&format!("gdscript/warnings/{w}=1")),
+                "missing strict warning {w} in:\n{cfg}"
+            );
+        }
+        assert!(!cfg.contains("=0"), "no strict warning should be disabled");
+    }
+
+    /// The guard creates override.cfg when absent and removes it on drop, leaving
+    /// the project exactly as it was. No Godot needed.
+    #[test]
+    fn guard_creates_and_removes_override() {
+        let dir = scratch_dir("create");
+        let override_path = dir.join("override.cfg");
+        assert!(!override_path.exists());
+        {
+            let _g = StrictWarnings::install(&dir).unwrap();
+            let written = std::fs::read_to_string(&override_path).unwrap();
+            assert!(written.contains("gdscript/warnings/unsafe_method_access=1"));
+        }
+        assert!(!override_path.exists(), "override.cfg must be removed on drop");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The guard restores a pre-existing override.cfg byte-for-byte on drop.
+    #[test]
+    fn guard_restores_existing_override() {
+        let dir = scratch_dir("restore");
+        let override_path = dir.join("override.cfg");
+        let original = b"[display]\nwindow/size/mode=3\n";
+        std::fs::write(&override_path, original).unwrap();
+        {
+            let _g = StrictWarnings::install(&dir).unwrap();
+            // While installed, our settings are in place, not the user's.
+            let live = std::fs::read_to_string(&override_path).unwrap();
+            assert!(live.contains("gdscript/warnings/untyped_declaration=1"));
+        }
+        let restored = std::fs::read(&override_path).unwrap();
+        assert_eq!(restored, original, "prior override.cfg must be restored");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Drift guard: the hostile inject fixture must explicitly set *every*
+    /// [`STRICT_WARNINGS`] key to `0`, so the live injection test genuinely proves we
+    /// override a project that disables the full set (not just Godot defaults). Fails
+    /// if the const and the fixture drift apart. No Godot needed.
+    #[test]
+    fn inject_fixture_disables_every_strict_warning() {
+        let project_godot =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/strict_inject_project/project.godot");
+        let text = std::fs::read_to_string(project_godot).unwrap();
+        for w in STRICT_WARNINGS {
+            assert!(
+                text.contains(&format!("gdscript/warnings/{w}=0")),
+                "inject fixture must disable strict warning `{w}` (set it to 0); \
+                 STRICT_WARNINGS and the fixture have drifted"
+            );
+        }
+    }
+
+    /// Per-test scratch dir under the target dir (no external temp-dir crate).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("strict-inject-test-{tag}"));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
     /// Phase 0 spike .2 — live extraction against a real Godot binary.
     /// Skipped automatically when no Godot is available (e.g. CI without the engine).
     #[test]
@@ -221,5 +401,39 @@ mod tests {
         );
         assert!(codes.contains(&"UNTYPED_DECLARATION"));
         assert!(codes.contains(&"INTEGER_DIVISION"));
+    }
+
+    /// Injection acceptance test: the fixture project's project.godot *actively
+    /// disables* the unsafe/untyped family, yet gdstrict must still surface those
+    /// warnings because it injects its own override.cfg. Proves we do not trust the
+    /// target's config. Skipped when no Godot is available.
+    #[test]
+    fn live_injection_overrides_hostile_project() {
+        let Some(godot) = find_godot() else {
+            eprintln!("no godot; skipping");
+            return;
+        };
+        if Command::new(&godot).arg("--version").output().is_err() {
+            eprintln!("godot not runnable; skipping");
+            return;
+        }
+        let project = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/strict_inject_project");
+        let override_path = Path::new(project).join("override.cfg");
+
+        let diags = check_script(&godot, Path::new(project), "unsafe.gd").unwrap();
+        let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
+        // These are all set to 0 in the fixture's project.godot.
+        assert!(
+            codes.contains(&"UNSAFE_METHOD_ACCESS"),
+            "injection failed: project disables this warning, got {diags:#?}"
+        );
+        assert!(codes.contains(&"UNTYPED_DECLARATION"));
+        assert!(codes.contains(&"INTEGER_DIVISION"));
+
+        // The guard must leave no trace in the source tree after the check.
+        assert!(
+            !override_path.exists(),
+            "override.cfg leaked into the project after check_script"
+        );
     }
 }

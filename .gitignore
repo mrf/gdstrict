@@ -10,6 +10,8 @@ Cargo.lock.orig
 .godot/
 *.import
 export_presets.cfg
+# gdstrict injects override.cfg during strict checks; never commit a leaked copy.
+override.cfg
 
 # Editor / OS
 .DS_Store

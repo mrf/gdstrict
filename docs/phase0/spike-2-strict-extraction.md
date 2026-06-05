@@ -51,8 +51,14 @@ throwaway `.gd` batch-validation harness.
 
 ## Caveats / follow-ups
 - Only line numbers (no columns) in CLI output.
-- Warnings require explicit `project.godot` enablement; `gdstrict` should inject/override
-  the warning settings it cares about rather than trusting the project's config.
+- ~~Warnings require explicit `project.godot` enablement; `gdstrict` should inject/override
+  the warning settings it cares about rather than trusting the project's config.~~
+  **Resolved (Phase 3, `godot-linter-phase3-strict-6zk.1`):** `check_script` now writes a
+  Godot `override.cfg` at the project root forcing the strict warning set on for the
+  duration of the check, then restores/removes it on drop. Verified against a fixture
+  project (`fixtures/strict_inject_project`) whose `project.godot` *disables* the family —
+  the warnings surface anyway. Open follow-up: the override lives at the shared project
+  root, so the Phase 2 concurrent worker pool must serialize installs or isolate per check.
 - Pin Godot version in CI; the message templates and flag behavior are the unstable
   contract (proposal #12548 would replace this with a real API).
 
