@@ -46,8 +46,8 @@ const LONG_ARRAY: &str = "var items = [aaaaaa, bbbbbb, cccccc, dddddd, eeeeee, f
 
 #[test]
 fn check_passes_on_already_formatted_file() {
-    // Canonical form uses 4-space indentation (gdstrict-format output).
-    let formatted = "extends Node\n\nfunc _ready() -> void:\n    pass\n";
+    // Canonical form uses tab indentation (gdstrict-format output, GDScript style).
+    let formatted = "extends Node\n\nfunc _ready() -> void:\n\tpass\n";
     let file = temp_file("formatted.gd", formatted);
     let out = Command::new(bin())
         .args(["format", "--check"])
