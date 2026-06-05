@@ -42,7 +42,22 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-/// Locate a Godot binary: `$GODOT`, else `godot` on PATH.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Locate a Godot binary: `$GODOT` env var (must exist), else `godot` on PATH.
+/// Returns `None` when neither is found, so callers can skip gracefully.
 pub fn find_godot() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("GODOT") {
         let pb = PathBuf::from(p);
@@ -50,8 +65,23 @@ pub fn find_godot() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-    // Trust PATH resolution at spawn time.
-    Some(PathBuf::from("godot"))
+    // Search PATH explicitly so None is a real signal, not a deferred spawn failure.
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("godot");
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        // Windows executables have extensions; try common ones.
+        #[cfg(windows)]
+        for ext in &["exe", "bat", "cmd"] {
+            let c = dir.join(format!("godot.{ext}"));
+            if is_executable(&c) {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 /// Run the full strict check on a single script within a project.
@@ -273,19 +303,13 @@ mod tests {
     }
 
     /// Phase 0 spike .2 — live extraction against a real Godot binary.
-    /// Skipped automatically when no Godot is available (e.g. CI without the engine).
+    /// Skipped when `find_godot()` returns None (godot not on PATH and $GODOT unset).
     #[test]
     fn live_strict_extraction() {
         let Some(godot) = find_godot() else {
-            eprintln!("no godot; skipping");
+            eprintln!("no godot on PATH; skipping");
             return;
         };
-        // Resolve godot or bail (PATH "godot" may not exist).
-        let probe = Command::new(&godot).arg("--version").output();
-        if probe.is_err() {
-            eprintln!("godot not runnable; skipping");
-            return;
-        }
         let project = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/strict_project");
         let diags = check_script(&godot, Path::new(project), "unsafe.gd").unwrap();
         let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
