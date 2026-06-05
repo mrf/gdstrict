@@ -1,0 +1,11 @@
+[package]
+name = "gdstrict-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "syntactic style rules over the gdstrict-syntax CST: rule trait + visitor + diagnostics"
+
+[dependencies]
+tree-sitter = { workspace = true }
+gdstrict-syntax = { path = "../gdstrict-syntax" }

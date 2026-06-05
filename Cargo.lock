@@ -32,6 +32,14 @@ name = "gdstrict-format"
 version = "0.0.0"
 
 [[package]]
+name = "gdstrict-lint"
+version = "0.0.0"
+dependencies = [
+ "gdstrict-syntax",
+ "tree-sitter",
+]
+
+[[package]]
 name = "gdstrict-strict"
 version = "0.0.0"
 
