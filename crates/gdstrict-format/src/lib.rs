@@ -281,6 +281,36 @@ func greet(name):
         );
     }
 
+    /// Prettier's magic trailing comma: an input trailing comma before the
+    /// closing delimiter forces the array / dictionary / call argument list to
+    /// stay expanded (one item per line), even though it would otherwise fit flat.
+    #[test]
+    fn input_trailing_comma_forces_expansion() {
+        let arr = check_roundtrip("var a := [1, 2, 3,]\n");
+        assert_eq!(arr, "var a := [\n\t1,\n\t2,\n\t3,\n]\n", "got:\n{arr}");
+
+        let dict = check_roundtrip("var d := {\"a\": 1, \"b\": 2,}\n");
+        assert_eq!(dict, "var d := {\n\t\"a\": 1,\n\t\"b\": 2,\n}\n", "got:\n{dict}");
+
+        let call = check_roundtrip("func f():\n\tg(alpha, beta,)\n");
+        assert_eq!(call, "func f():\n\tg(\n\t\talpha,\n\t\tbeta,\n\t)\n", "got:\n{call}");
+    }
+
+    /// The mirror case: without an input trailing comma, the same collections
+    /// collapse to one line when they fit — magic-comma did not over-break.
+    #[test]
+    fn no_trailing_comma_collapses_when_it_fits() {
+        assert_eq!(check_roundtrip("var a := [1, 2, 3]\n"), "var a := [1, 2, 3]\n");
+        assert_eq!(
+            check_roundtrip("var d := {\"a\": 1, \"b\": 2}\n"),
+            "var d := {\"a\": 1, \"b\": 2}\n"
+        );
+        assert_eq!(
+            check_roundtrip("func f():\n\tg(alpha, beta)\n"),
+            "func f():\n\tg(alpha, beta)\n"
+        );
+    }
+
     /// Every grammar fixture must format, re-parse clean, and be idempotent.
     #[test]
     fn all_grammar_fixtures_roundtrip() {

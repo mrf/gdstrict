@@ -60,25 +60,68 @@ fn field<'a>(n: Node<'a>, name: &str) -> Option<Node<'a>> {
 /// Phase 0 [`crate::doc::call`] fixture (which stays as a fixed `&str`-based test
 /// case); real lowering goes through here. Keep the two in sync if the wrapping
 /// shape ever changes.
-fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+///
+/// `force_break` implements Prettier's "magic trailing comma": when the *input*
+/// already had a trailing comma before `close` (see [`has_magic_trailing_comma`]),
+/// the caller passes `true` and the collection stays expanded — one item per line —
+/// regardless of whether it would otherwise fit flat. The expanded shape is
+/// byte-identical to the soft path's broken mode (same `open` / one-item-per-line /
+/// trailing comma / dedented `close`), so output stays idempotent: a re-parse sees
+/// the emitted trailing comma and force-breaks again to the same bytes.
+fn delimited(open: &str, items: Vec<Doc>, close: &str, force_break: bool) -> Doc {
     if items.is_empty() {
         return concat([text(open), text(close)]);
     }
-    let mut inner: Vec<Doc> = vec![Doc::SoftLine];
+    if force_break {
+        // Build the broken form directly with `HardLine`s instead of a fits()-driven
+        // `Group`, so it always expands. The trailing comma is unconditional here
+        // (`text(",")`) rather than `trailing_comma()` since there is no flat mode.
+        let inner = interleave(items, Doc::HardLine, Doc::HardLine, text(","));
+        return concat([text(open), indent(concat(inner)), Doc::HardLine, text(close)]);
+    }
+    let inner = interleave(items, Doc::SoftLine, Doc::Line, trailing_comma());
+    group(concat([text(open), indent(concat(inner)), Doc::SoftLine, text(close)]))
+}
+
+/// Interleave wrappable list `items` into the inner doc sequence shared by both
+/// of [`delimited`]'s shapes: a `lead` break after the opener, a `,` + `sep` break
+/// between items, and a `term` after the last item (a real comma when force-broken,
+/// a magic [`trailing_comma`] in the soft path). Only the break/terminator
+/// primitives differ between the two shapes — the interleaving is identical.
+fn interleave(items: Vec<Doc>, lead: Doc, sep: Doc, term: Doc) -> Vec<Doc> {
+    let mut inner: Vec<Doc> = vec![lead];
     for (i, it) in items.into_iter().enumerate() {
         if i > 0 {
             inner.push(text(","));
-            inner.push(Doc::Line);
+            inner.push(sep.clone());
         }
         inner.push(it);
     }
-    inner.push(trailing_comma());
-    group(concat([
-        text(open),
-        indent(concat(inner)),
-        Doc::SoftLine,
-        text(close),
-    ]))
+    inner.push(term);
+    inner
+}
+
+/// Whether a collection node (`array`, `dictionary`, `arguments`) carries an
+/// explicit trailing comma in the *input* source — a `,` token immediately before
+/// the closing delimiter, skipping any interleaved comments. Prettier treats this
+/// "magic trailing comma" as an author's request to keep the collection expanded.
+///
+/// Scans the node's children (including the anonymous delimiter/comma tokens, which
+/// `named_children` omits) from the end: skip the closing delimiter, skip comments,
+/// then the next token decides — a `,` means a trailing comma, an element means none.
+fn has_magic_trailing_comma(n: Node) -> bool {
+    let mut c = n.walk();
+    let children: Vec<Node> = n.children(&mut c).collect();
+    let mut iter = children.iter().rev();
+    iter.next(); // closing delimiter (last child)
+    for ch in iter {
+        match ch.kind() {
+            "comment" => continue,
+            "," => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// `header:` followed by an indented body block. Used by every compound
@@ -300,19 +343,31 @@ pub fn lower(n: Node, src: &str) -> Doc {
             Some(e) => concat([text("("), lower(*e, src), text(")")]),
             None => leaf(src, n),
         },
-        "array" => delimited("[", named_children(n).iter().map(|c| lower(*c, src)).collect(), "]"),
+        "array" => delimited(
+            "[",
+            named_children(n).iter().map(|c| lower(*c, src)).collect(),
+            "]",
+            has_magic_trailing_comma(n),
+        ),
         "dictionary" => delimited(
             "{",
             named_children(n).iter().map(|c| lower(*c, src)).collect(),
             "}",
+            has_magic_trailing_comma(n),
         ),
         "pair" => pair(n, src),
         "arguments" => delimited(
             "(",
             named_children(n).iter().map(|c| lower(*c, src)).collect(),
             ")",
+            has_magic_trailing_comma(n),
         ),
-        "parameters" => delimited("(", named_children(n).iter().map(|c| param(*c, src)).collect(), ")"),
+        "parameters" => delimited(
+            "(",
+            named_children(n).iter().map(|c| param(*c, src)).collect(),
+            ")",
+            false,
+        ),
 
         "call" => call_like(n, src),
         "attribute_call" => call_like(n, src),
@@ -579,7 +634,9 @@ fn enum_def(n: Node, src: &str) -> Doc {
         .iter()
         .map(|c| enumerator(*c, src))
         .collect();
-    concat([concat(prefix), delimited("{", items, "}")])
+    // Scope magic-trailing-comma to array/dict/call (the issue's three cases); enum
+    // bodies keep the current fits()-driven behavior.
+    concat([concat(prefix), delimited("{", items, "}", false)])
 }
 
 fn enumerator(n: Node, src: &str) -> Doc {
