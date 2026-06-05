@@ -64,11 +64,20 @@ enum Mode {
     Break,
 }
 
-/// Does the remaining content fit in `width` columns if rendered flat?
-/// Scans forward through the work stack until a newline would be emitted.
-fn fits(mut width: isize, stack: &[(usize, Mode, &Doc)]) -> bool {
-    // Local lookahead stack, seeded from the real stack (top = last).
-    let mut work: Vec<(usize, Mode, &Doc)> = stack.iter().rev().cloned().collect();
+/// Does the content fit in `width` columns if rendered flat?
+///
+/// Scans `next` (the group being measured, in flat mode) and then the `rest` of
+/// the work stack — the commands that will print on the same line *after* the
+/// group closes — until a newline would be emitted or the width budget is spent.
+/// Threading `rest` is what makes this Wadler/Prettier-correct: a group must be
+/// judged against the trailing same-line content, not in isolation, or it will
+/// under-break when something follows it before the next hard line break.
+///
+/// `rest` mirrors `render`'s work stack (top = last element); `next` is pushed on
+/// top so it is measured first, then `rest` is consumed in print order.
+fn fits(mut width: isize, next: (usize, Mode, &Doc), rest: &[(usize, Mode, &Doc)]) -> bool {
+    let mut work: Vec<(usize, Mode, &Doc)> = rest.to_vec();
+    work.push(next);
     while let Some((ind, mode, doc)) = work.pop() {
         if width < 0 {
             return false;
@@ -120,10 +129,13 @@ pub fn render(doc: &Doc, width: usize) -> String {
             }
             Doc::Indent(d) => stack.push((ind + INDENT, mode, d)),
             Doc::Group(d) => {
-                // Decide this group's mode by trying flat.
+                // Decide this group's mode by trying it flat *together with* the
+                // content that will share its line afterwards (the rest of the
+                // work stack), up to the next hard break. See `fits`.
                 let flat_fits = fits(
                     width as isize - col as isize,
-                    &[(ind, Mode::Flat, d)],
+                    (ind, Mode::Flat, d),
+                    &stack,
                 );
                 let m = if flat_fits { Mode::Flat } else { Mode::Break };
                 stack.push((ind, m, d));
@@ -230,6 +242,44 @@ configure_the_whole_system(
         assert_eq!(
             render(&d, 20),
             "foo(\n    alpha,\n    beta,\n    gamma,\n)"
+        );
+    }
+
+    /// A nested group must break when the *combined* line — the group plus the
+    /// text that follows it on the same line — overflows the width, even though
+    /// the group fits in isolation. Before threading the trailing content into
+    /// `fits`, this under-broke: the inner group was judged flat (15 cols) and the
+    /// 54-col combined line silently overflowed the 30-col budget.
+    #[test]
+    fn nested_group_breaks_for_trailing_same_line_content() {
+        let inner = call("foo", &["aaaa", "bbbb"]); // "foo(aaaa, bbbb)" == 15 cols flat
+        let doc = concat([inner, text(" == some_long_trailing_comparison_value")]);
+
+        // Flat, the whole line is 54 cols — comfortably over 30. The inner group
+        // alone is 15 cols and would "fit" if measured in isolation (the bug).
+        let out = render(&doc, 30);
+        let expected = "\
+foo(
+    aaaa,
+    bbbb,
+) == some_long_trailing_comparison_value";
+        assert_eq!(out, expected, "\n--- got ---\n{out}\n");
+        assert!(
+            out.contains('\n'),
+            "inner group must break; trailing content pushes the line past 30 cols"
+        );
+    }
+
+    /// The trailing content only forces a break when it actually overflows. With a
+    /// wide enough budget the same doc stays flat — confirming the fix didn't just
+    /// make groups break unconditionally.
+    #[test]
+    fn nested_group_stays_flat_when_trailing_content_fits() {
+        let inner = call("foo", &["aaaa", "bbbb"]);
+        let doc = concat([inner, text(" == some_long_trailing_comparison_value")]);
+        assert_eq!(
+            render(&doc, 100),
+            "foo(aaaa, bbbb) == some_long_trailing_comparison_value"
         );
     }
 
