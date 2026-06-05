@@ -16,3 +16,4 @@ export_presets.cfg
 *.swp
 .idea/
 .vscode/
+.orchestrator-*
