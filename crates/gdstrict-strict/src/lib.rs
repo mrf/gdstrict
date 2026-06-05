@@ -137,6 +137,15 @@ pub fn parse_diagnostics(stderr: &str) -> Vec<Diagnostic> {
 }
 
 /// Parse `   at: GDScript::reload (res://path.gd:42)` → ("res://path.gd", 42).
+///
+/// Handles three forms:
+///   file:line          — last segment is the line
+///   file:line:column   — second-to-last is line, last is column (column is discarded)
+///   res://file:line    — the `://` in the scheme is not confused for a line separator
+///
+/// Strategy: split on `:`, walk from the right. If the last segment is numeric
+/// AND the second-to-last is also numeric, treat them as line:column and take the
+/// second-to-last as the line. Otherwise the last numeric segment is the line.
 fn parse_locator(line: &str) -> Option<(String, usize)> {
     let line = line.trim_start();
     if !line.starts_with("at:") {
@@ -145,10 +154,27 @@ fn parse_locator(line: &str) -> Option<(String, usize)> {
     let open = line.rfind('(')?;
     let close = line.rfind(')')?;
     let inner = &line[open + 1..close];
-    let colon = inner.rfind(':')?;
-    let path = inner[..colon].to_string();
-    let ln = inner[colon + 1..].trim().parse().ok()?;
-    Some((path, ln))
+
+    let parts: Vec<&str> = inner.split(':').collect();
+    let n = parts.len();
+    if n < 2 {
+        return None;
+    }
+
+    // Last segment must be a number (line or column).
+    let last: usize = parts[n - 1].trim().parse().ok()?;
+
+    // If the second-to-last is also a number, this is file:line:column.
+    if n >= 3 {
+        if let Ok(line_num) = parts[n - 2].trim().parse::<usize>() {
+            let path = parts[..n - 2].join(":");
+            return Some((path, line_num));
+        }
+    }
+
+    // Simple file:line (path may itself contain ':' e.g. res://).
+    let path = parts[..n - 1].join(":");
+    Some((path, last))
 }
 
 /// Best-effort message → warning code. Templates are stable per Godot version;
@@ -177,6 +203,54 @@ fn classify_warning(msg: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- parse_locator unit tests ---
+
+    #[test]
+    fn locator_plain_file_line() {
+        assert_eq!(
+            parse_locator("     at: GDScript::reload (path/to/file.gd:10)"),
+            Some(("path/to/file.gd".into(), 10))
+        );
+    }
+
+    #[test]
+    fn locator_file_line_column() {
+        // Column is discarded; line must be 42, not 5.
+        assert_eq!(
+            parse_locator("     at: GDScript::reload (path/to/file.gd:42:5)"),
+            Some(("path/to/file.gd".into(), 42))
+        );
+    }
+
+    #[test]
+    fn locator_res_scheme_line() {
+        // res:// contains '://' — path must not be split on the scheme colon.
+        assert_eq!(
+            parse_locator("     at: GDScript::reload (res://path.gd:7)"),
+            Some(("res://path.gd".into(), 7))
+        );
+    }
+
+    #[test]
+    fn locator_res_scheme_line_column() {
+        assert_eq!(
+            parse_locator("     at: GDScript::reload (res://path.gd:42:5)"),
+            Some(("res://path.gd".into(), 42))
+        );
+    }
+
+    #[test]
+    fn locator_no_line_returns_none() {
+        assert_eq!(parse_locator("     at: GDScript::reload (res://path.gd)"), None);
+    }
+
+    #[test]
+    fn locator_not_at_line_returns_none() {
+        assert_eq!(parse_locator("WARNING: something happened"), None);
+    }
+
+    // --- parse_diagnostics integration tests ---
 
     #[test]
     fn parses_warning_block() {
