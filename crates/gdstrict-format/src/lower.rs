@@ -13,6 +13,7 @@
 //! corrupts code it doesn't yet understand.
 
 use crate::doc::{concat, group, indent, text, trailing_comma, verbatim, Doc};
+use crate::trivia::{attach, Comment, Element, Item, RawElement};
 use tree_sitter::Node;
 
 /// Exact source bytes of a node, as a `Doc`. Uses [`Doc::Verbatim`] when the
@@ -92,29 +93,68 @@ fn suite(header: Doc, body: Node, src: &str) -> Doc {
 /// statement — true inside an indented suite (the newline after the `:`), false
 /// at file scope. One blank line is preserved wherever the source had a gap of
 /// two or more rows between siblings (black-style: collapse runs of blanks to 1).
+///
+/// Comments are interleaved `(comment)` children here; rather than lowering each
+/// on its own line (which relocates inline comments and is exactly where gdformat
+/// breaks), we hand the child sequence to [`crate::trivia::attach`] so each
+/// comment is bound to the statement it belongs to — leading (own line above),
+/// trailing (inline, same row), or dangling (kept when no statement follows).
 fn block(node: Node, src: &str, leading: bool) -> Doc {
-    let kids = named_children(node);
+    let raw: Vec<RawElement<Node>> = named_children(node)
+        .into_iter()
+        .map(|kid| {
+            let element = if kid.kind() == "comment" {
+                Element::Comment(Comment::parse(slice(src, kid)))
+            } else {
+                Element::Stmt(kid)
+            };
+            RawElement {
+                element,
+                start_row: kid.start_position().row,
+                end_row: kid.end_position().row,
+            }
+        })
+        .collect();
+
+    let items = attach(raw);
     let mut parts: Vec<Doc> = Vec::new();
-    let mut prev_end: Option<usize> = None;
-    for (i, kid) in kids.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         if i == 0 {
             if leading {
                 parts.push(Doc::HardLine);
             }
         } else {
-            let gap = kid.start_position().row as isize - prev_end.unwrap() as isize;
-            if gap >= 2 {
-                // A preserved blank line. Emit a bare newline (no indent) so the
-                // blank line carries no trailing whitespace; the following
-                // `HardLine` then breaks+indents to the next statement.
+            if item.blank_before {
+                // A preserved blank line (a run of blanks collapses to one). Emit a
+                // bare newline (no indent) so the blank carries no trailing
+                // whitespace; the following `HardLine` breaks+indents to the item.
                 parts.push(verbatim("\n"));
             }
             parts.push(Doc::HardLine);
         }
-        parts.push(lower(*kid, src));
-        prev_end = Some(kid.end_position().row);
+        parts.push(item_doc(item, src));
     }
     concat(parts)
+}
+
+/// Lower one attached item: its leading comments (each on its own line), the
+/// statement (via the normal [`lower`] dispatch — no expression re-layout is
+/// regressed), and any trailing inline comment. A dangling comment group (no
+/// statement) emits just its comments.
+fn item_doc(item: &Item<Node<'_>>, src: &str) -> Doc {
+    let mut lines: Vec<Doc> = item.leading.iter().map(|c| text(c.text.clone())).collect();
+    if let Some(stmt) = item.stmt {
+        let mut stmt_doc = lower(stmt, src);
+        if let Some(trailing) = &item.trailing {
+            // Inline comment stays on the statement's last line after a two-space
+            // gap (black-family convention). doc.rs has no line-suffix primitive,
+            // so append directly; if the statement's layout breaks, this lands the
+            // comment after the closing delimiter — still the statement's last line.
+            stmt_doc = concat([stmt_doc, text(format!("  {}", trailing.text))]);
+        }
+        lines.push(stmt_doc);
+    }
+    join(lines, Doc::HardLine)
 }
 
 /// Render the `annotations` child (if any) of a statement, each annotation
