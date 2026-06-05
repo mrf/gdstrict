@@ -4,6 +4,7 @@
 //!   0  success — files written, or nothing would change under `--check`
 //!   1  under `--check`, at least one file would change; OR an error occurred
 
+mod config;
 mod diff;
 mod format;
 mod walk;
@@ -36,6 +37,14 @@ struct FormatArgs {
     #[arg(long)]
     diff: bool,
 
+    /// Use this exact gdstrict.toml instead of discovering one per file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Maximum line length before wrapping (overrides any config file).
+    #[arg(long, value_name = "N")]
+    line_length: Option<usize>,
+
     /// Files or directories to format (directories are walked recursively).
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
@@ -49,6 +58,15 @@ fn main() -> ExitCode {
 }
 
 fn run_format(args: &FormatArgs) -> ExitCode {
+    // Parse `--config` / validate `--line-length` once, up front.
+    let mut resolver = match config::Resolver::new(args.config.as_deref(), args.line_length) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
     let (files, walk_errors) = walk::collect_gd_files(&args.paths);
 
     let mut had_error = false;
@@ -72,7 +90,16 @@ fn run_format(args: &FormatArgs) -> ExitCode {
             }
         };
 
-        let formatted = format::format_source(&src);
+        let line_length = match resolver.line_length_for(path) {
+            Ok(n) => n,
+            Err(err) => {
+                eprintln!("error: {err}");
+                had_error = true;
+                continue;
+            }
+        };
+
+        let formatted = format::format_source(&src, line_length);
         if formatted == src {
             continue;
         }

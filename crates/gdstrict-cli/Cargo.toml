@@ -13,11 +13,12 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 similar = "3"
-walkdir = "2"
-# The formatter engine. The CLI delegates all source-level formatting here.
-# NOTE (godot-linter-phase1-formatter-i7d.5): gdstrict-format does not yet expose
-# a source-level `format(&str) -> String` entry point (only the document IR +
-# renderer in `gdstrict_format::doc`). The CST -> Doc lowering is owned by a
-# sibling task. `src/format.rs` isolates the seam so wiring the real engine in is
-# a one-line change. See the deferral note there.
+# ripgrep's path walker: gitignore semantics + nested ignore files + a custom
+# .gdignore. Supersedes the previous minimal walkdir-based ignore logic.
+ignore = "0.4"
+# Config discovery: parse the single-knob gdstrict.toml (line-length).
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# The formatter engine. The CLI delegates all source-level formatting here via
+# `src/format.rs`, threading the resolved line length in as the target width.
 gdstrict-format = { path = "../gdstrict-format" }
