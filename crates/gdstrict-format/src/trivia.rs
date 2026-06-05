@@ -15,8 +15,10 @@
 //! - **leading** comments — own-line comments above a statement (incl. `##` doc
 //!   comments and the top-of-file banner);
 //! - **trailing** comment — a same-line comment after a statement (`x = 1  # c`);
-//! - **blank_before** — whether a run of one or more blank lines preceded the
-//!   item (runs collapse to a single blank: presence is preserved, not count).
+//! - **blanks_before** — how many blank lines preceded the item, capped at 2
+//!   (the most the GDScript style guide ever keeps: 2 between top-level
+//!   definitions). A run of 3+ blanks reports 2; the *consumer* ([`crate::lower`])
+//!   decides the final cap by context — 1 inside funcs, 2 between top-level defs.
 //!
 //! The attachment logic is generic over the statement payload `T` so it can be
 //! unit-tested without tree-sitter (`T = &str`) and instantiated over
@@ -83,9 +85,13 @@ pub struct Item<T> {
     pub stmt: Option<T>,
     /// A same-line comment after the statement.
     pub trailing: Option<Comment>,
-    /// Whether at least one blank line preceded this item.
-    pub blank_before: bool,
+    /// Number of blank lines preceding this item, capped at 2. See the module
+    /// docs: the consumer applies the final context-dependent cap.
+    pub blanks_before: usize,
 }
+
+/// The most blank lines we ever preserve (2, between top-level definitions).
+const MAX_BLANKS: usize = 2;
 
 /// Attach trivia to statements in a block child sequence.
 ///
@@ -95,8 +101,8 @@ pub struct Item<T> {
 ///   **trailing** (inline) comment.
 /// - Any other comment is **leading**: it is buffered and attached to the next
 ///   statement (or becomes a dangling group if none follows).
-/// - `blank_before` is set when an item's first row is more than one line below
-///   the previous item's last row (a blank run, collapsed to presence).
+/// - `blanks_before` is the count of blank lines between an item's first row and
+///   the previous item's last row, capped at [`MAX_BLANKS`].
 pub fn attach<T>(elements: impl IntoIterator<Item = RawElement<T>>) -> Vec<Item<T>> {
     // Build items, tracking each item's vertical extent for blank detection.
     struct Pending<T> {
@@ -139,7 +145,7 @@ pub fn attach<T>(elements: impl IntoIterator<Item = RawElement<T>>) -> Vec<Item<
                         leading: std::mem::take(&mut leading),
                         stmt: Some(payload),
                         trailing: None,
-                        blank_before: false,
+                        blanks_before: 0,
                     },
                     first_row,
                     last_row: raw.end_row,
@@ -157,20 +163,20 @@ pub fn attach<T>(elements: impl IntoIterator<Item = RawElement<T>>) -> Vec<Item<
                 leading,
                 stmt: None,
                 trailing: None,
-                blank_before: false,
+                blanks_before: 0,
             },
             first_row,
             last_row,
         });
     }
 
-    // Second pass: compute blank_before from row gaps.
+    // Second pass: compute blanks_before from row gaps (capped at MAX_BLANKS).
     let mut prev_last_row: Option<usize> = None;
     let mut out = Vec::with_capacity(pending.len());
     for mut p in pending {
         if let Some(prev) = prev_last_row {
             if p.first_row > prev + 1 {
-                p.item.blank_before = true;
+                p.item.blanks_before = (p.first_row - prev - 1).min(MAX_BLANKS);
             }
         }
         prev_last_row = Some(p.last_row);
@@ -236,17 +242,20 @@ mod tests {
     }
 
     #[test]
-    fn blank_run_sets_presence_flag_once() {
-        // a (row0), then 2 blank lines, then b (row3).
+    fn blank_run_counts_capped_at_two() {
+        // a (row0), then 2 blank lines, then b (row3) → exactly 2.
         let items = attach([stmt(0, "a"), stmt(3, "b")]);
-        assert!(!items[0].blank_before);
-        assert!(items[1].blank_before, "blank run should be preserved");
+        assert_eq!(items[0].blanks_before, 0);
+        assert_eq!(items[1].blanks_before, 2, "two blank lines preserved");
+        // A long run (rows 0 -> 10 = 9 blanks) is capped at 2.
+        let big = attach([stmt(0, "a"), stmt(10, "b")]);
+        assert_eq!(big[1].blanks_before, 2, "3+ blanks cap at 2");
     }
 
     #[test]
     fn adjacent_statements_have_no_blank() {
         let items = attach([stmt(0, "a"), stmt(1, "b")]);
-        assert!(!items[1].blank_before);
+        assert_eq!(items[1].blanks_before, 0);
     }
 
     #[test]
@@ -255,7 +264,7 @@ mod tests {
         // comment, so the *item* (comment+b) is blank_before.
         let items = attach([stmt(0, "a"), comment(2, "# lead"), stmt(3, "b")]);
         assert_eq!(items.len(), 2);
-        assert!(items[1].blank_before);
+        assert_eq!(items[1].blanks_before, 1);
         assert_eq!(items[1].leading[0].text, "# lead");
     }
 

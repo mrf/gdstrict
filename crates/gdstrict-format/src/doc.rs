@@ -9,8 +9,18 @@
 //! `(indent, mode, doc)` plus a `fits` lookahead). See:
 //! Wadler, "A prettier printer" (2003); Prettier's `doc-printer`.
 
-/// Number of spaces per indent level.
+/// Visual width of one indent level, in columns. GDScript is tab-indented (one
+/// TAB per level — see [`indent_str`]), but the layout engine still needs a
+/// *column cost* per level to decide whether a group fits within the line width;
+/// a tab is budgeted as this many columns. Because `ind` only ever advances by
+/// `INDENT`, `ind / INDENT` recovers the nesting level for tab rendering.
 pub const INDENT: usize = 4;
+
+/// The indentation string for a given column depth `ind`. GDScript uses tabs, so
+/// this is one TAB per nesting level (`ind / INDENT`), not `ind` spaces.
+fn indent_str(ind: usize) -> String {
+    "\t".repeat(ind / INDENT)
+}
 
 #[derive(Debug, Clone)]
 pub enum Doc {
@@ -173,7 +183,7 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 }
                 Mode::Break => {
                     out.push('\n');
-                    out.push_str(&" ".repeat(ind));
+                    out.push_str(&indent_str(ind));
                     col = ind;
                 }
             },
@@ -181,13 +191,13 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 Mode::Flat => {}
                 Mode::Break => {
                     out.push('\n');
-                    out.push_str(&" ".repeat(ind));
+                    out.push_str(&indent_str(ind));
                     col = ind;
                 }
             },
             Doc::HardLine => {
                 out.push('\n');
-                out.push_str(&" ".repeat(ind));
+                out.push_str(&indent_str(ind));
                 col = ind;
             }
             Doc::IfBreak { break_, flat } => match mode {
@@ -252,10 +262,10 @@ mod tests {
         let out = render(&d, 100);
         let expected = "\
 configure_the_whole_system(
-    first_long_argument_name,
-    second_long_argument_name,
-    third_long_argument_name,
-    fourth_long_argument_name,
+\tfirst_long_argument_name,
+\tsecond_long_argument_name,
+\tthird_long_argument_name,
+\tfourth_long_argument_name,
 )";
         assert_eq!(out, expected, "\n--- got ---\n{out}\n");
     }
@@ -267,7 +277,7 @@ configure_the_whole_system(
         assert_eq!(render(&d, 100), "foo(alpha, beta, gamma)");
         assert_eq!(
             render(&d, 20),
-            "foo(\n    alpha,\n    beta,\n    gamma,\n)"
+            "foo(\n\talpha,\n\tbeta,\n\tgamma,\n)"
         );
     }
 
@@ -286,8 +296,8 @@ configure_the_whole_system(
         let out = render(&doc, 30);
         let expected = "\
 foo(
-    aaaa,
-    bbbb,
+\taaaa,
+\tbbbb,
 ) == some_long_trailing_comparison_value";
         assert_eq!(out, expected, "\n--- got ---\n{out}\n");
         assert!(
