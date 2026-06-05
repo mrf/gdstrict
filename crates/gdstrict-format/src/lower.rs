@@ -91,8 +91,11 @@ fn suite(header: Doc, body: Node, src: &str) -> Doc {
 ///
 /// `leading` controls whether a `HardLine` is emitted *before* the first
 /// statement — true inside an indented suite (the newline after the `:`), false
-/// at file scope. One blank line is preserved wherever the source had a gap of
-/// two or more rows between siblings (black-style: collapse runs of blanks to 1).
+/// at file scope. Blank lines are normalized to the GDScript style guide: at most
+/// one blank line inside a block, but up to two between adjacent *top-level
+/// definitions* (functions / classes) at file scope. Leading and trailing blank
+/// lines are dropped (the first item never gets a preceding blank; `format()`
+/// trims the file's trailing newlines). See [`blank_cap`].
 ///
 /// Comments are interleaved `(comment)` children here; rather than lowering each
 /// on its own line (which relocates inline comments and is exactly where gdformat
@@ -124,10 +127,12 @@ fn block(node: Node, src: &str, leading: bool) -> Doc {
                 parts.push(Doc::HardLine);
             }
         } else {
-            if item.blank_before {
-                // A preserved blank line (a run of blanks collapses to one). Emit a
-                // bare newline (no indent) so the blank carries no trailing
-                // whitespace; the following `HardLine` breaks+indents to the item.
+            // Normalize the blank run: cap at 1 in general, 2 between top-level
+            // definitions. Each preserved blank is a bare newline (no indent) so it
+            // carries no trailing whitespace; the following `HardLine`
+            // breaks+indents to the item.
+            let cap = blank_cap(&items[i - 1], item, leading);
+            for _ in 0..item.blanks_before.min(cap) {
                 parts.push(verbatim("\n"));
             }
             parts.push(Doc::HardLine);
@@ -135,6 +140,32 @@ fn block(node: Node, src: &str, leading: bool) -> Doc {
         parts.push(item_doc(item, src));
     }
     concat(parts)
+}
+
+/// How many blank lines to keep between `prev` and `cur`. The GDScript style
+/// guide surrounds top-level functions and class definitions with two blank
+/// lines; everything else (statements, members, block bodies) gets at most one.
+///
+/// `leading` is false only at file scope (the `source` block), so the two-blank
+/// allowance is restricted to top-level definitions — methods inside an inner
+/// `class` body keep the conservative single-blank cap.
+fn blank_cap(prev: &Item<Node<'_>>, cur: &Item<Node<'_>>, leading: bool) -> usize {
+    if !leading && (is_top_level_def(prev) || is_top_level_def(cur)) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Whether an item's statement is a definition the style guide surrounds with two
+/// blank lines: a function, constructor, or (inner) class.
+fn is_top_level_def(item: &Item<Node<'_>>) -> bool {
+    item.stmt.is_some_and(|s| {
+        matches!(
+            s.kind(),
+            "function_definition" | "constructor_definition" | "class_definition"
+        )
+    })
 }
 
 /// Lower one attached item: its leading comments (each on its own line), the

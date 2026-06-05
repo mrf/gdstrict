@@ -1,8 +1,10 @@
 extends Node
 
+
 func greet(name: String) -> String:
-    return "Hello, " + name + "!"
+	return "Hello, " + name + "!"
+
 
 func _ready() -> void:
-    var msg := greet("world")
-    print(msg)
+	var msg := greet("world")
+	print(msg)

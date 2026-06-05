@@ -71,13 +71,13 @@ mod tests {
     #[test]
     fn function_with_body() {
         let out = check_roundtrip("func _ready()->void:\n\tpass\n");
-        assert_eq!(out, "func _ready() -> void:\n    pass\n");
+        assert_eq!(out, "func _ready() -> void:\n\tpass\n");
     }
 
     #[test]
     fn call_stays_flat_when_short() {
         let out = check_roundtrip("func f()->void:\n\tprint(1, 2, 3)\n");
-        assert_eq!(out, "func f() -> void:\n    print(1, 2, 3)\n");
+        assert_eq!(out, "func f() -> void:\n\tprint(1, 2, 3)\n");
     }
 
     #[test]
@@ -86,11 +86,11 @@ mod tests {
         let out = check_roundtrip(src);
         let expected = "\
 func f() -> void:
-    configure(
-        the_first_long_argument_value,
-        the_second_long_argument_value,
-        the_third_long_argument_value,
-    )
+\tconfigure(
+\t\tthe_first_long_argument_value,
+\t\tthe_second_long_argument_value,
+\t\tthe_third_long_argument_value,
+\t)
 ";
         assert_eq!(out, expected, "\n--- got ---\n{out}");
     }
@@ -115,12 +115,12 @@ func f() -> void:
         let out = check_roundtrip(src);
         let expected = "\
 func f(n: int) -> void:
-    if n > 0:
-        print(1)
-    elif n < 0:
-        print(2)
-    else:
-        print(3)
+\tif n > 0:
+\t\tprint(1)
+\telif n < 0:
+\t\tprint(2)
+\telse:
+\t\tprint(3)
 ";
         assert_eq!(out, expected);
     }
@@ -135,7 +135,7 @@ func f(n: int) -> void:
     fn preserved_blank_line_has_no_trailing_whitespace() {
         // Blank lines inside an indented block must not carry indent spaces.
         let out = check_roundtrip("func f() -> void:\n\tvar a := 1\n\n\tvar b := 2\n");
-        assert_eq!(out, "func f() -> void:\n    var a := 1\n\n    var b := 2\n");
+        assert_eq!(out, "func f() -> void:\n\tvar a := 1\n\n\tvar b := 2\n");
         for line in out.lines() {
             assert_eq!(line, line.trim_end(), "trailing whitespace in line: {line:?}");
         }
@@ -159,8 +159,8 @@ func f(n: int) -> void:
     fn nested_array_wraps_one_per_line() {
         let src = "var big := [aaaaaaaaaaaaaa, bbbbbbbbbbbbbb, cccccccccccccc, dddddddddddddd, eeeeeeeeeeeeee, ffffffffffffff]\n";
         let out = check_roundtrip(src);
-        assert!(out.contains("[\n    aaaaaaaaaaaaaa,\n"), "got:\n{out}");
-        assert!(out.ends_with("    ffffffffffffff,\n]\n"), "got:\n{out}");
+        assert!(out.contains("[\n\taaaaaaaaaaaaaa,\n"), "got:\n{out}");
+        assert!(out.ends_with("\tffffffffffffff,\n]\n"), "got:\n{out}");
     }
 
     #[test]
@@ -196,7 +196,7 @@ func f(n: int) -> void:
             lines[ci + 1].starts_with("func foo"),
             "leading comment must sit directly above the func; got:\n{out}"
         );
-        assert!(out.contains("    print(x)"), "body must be reformatted; got:\n{out}");
+        assert!(out.contains("\tprint(x)"), "body must be reformatted; got:\n{out}");
     }
 
     #[test]
@@ -206,7 +206,7 @@ func f(n: int) -> void:
         let out = check_roundtrip("func foo():\n\tvar x:int=5  # the counter\n");
         let line = out.lines().find(|l| l.contains("var x")).expect("var line present");
         assert_eq!(
-            line, "    var x: int = 5  # the counter",
+            line, "\tvar x: int = 5  # the counter",
             "inline comment must stay inline with the reformatted statement; got:\n{out}"
         );
     }
@@ -237,7 +237,7 @@ func f(n: int) -> void:
         let lines: Vec<&str> = out.lines().collect();
         let ci = lines.iter().position(|l| l.contains("# step one")).unwrap();
         assert!(
-            lines[ci].starts_with("    #"),
+            lines[ci].starts_with("\t#"),
             "in-body comment must be indented to the block; got:\n{out}"
         );
         assert!(lines[ci + 1].contains("var x := 1"));
@@ -276,7 +276,7 @@ func greet(name):
         }
         let msg_line = out.lines().find(|l| l.contains("var msg")).unwrap();
         assert_eq!(
-            msg_line, "    var msg = \"hi\"  # placeholder",
+            msg_line, "\tvar msg = \"hi\"  # placeholder",
             "inline comment stays inline and the assignment is normalized; got:\n{out}"
         );
     }

@@ -8,16 +8,20 @@ extends CharacterBody2D
 
 var _health: int
 
+
 func _ready() -> void:
-    _health = max_health
+	_health = max_health
+
 
 func take_damage(amount: int) -> void:
-    _health = max(0, _health - amount)
-    if _health == 0:
-        _die()
+	_health = max(0, _health - amount)
+	if _health == 0:
+		_die()
+
 
 func _die() -> void:
-    queue_free()
+	queue_free()
+
 
 func get_health_ratio() -> float:
-    return float(_health) / float(max_health)
+	return float(_health) / float(max_health)
