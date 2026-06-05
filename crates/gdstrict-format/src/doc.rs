@@ -16,6 +16,14 @@ pub const INDENT: usize = 4;
 pub enum Doc {
     /// Literal text. Must not contain newlines.
     Text(String),
+    /// Literal text emitted exactly as-is, newlines and all, with NO
+    /// re-indentation. This is a *content* leaf (not a layout primitive): it
+    /// exists so lossless tokens whose bytes span multiple source lines —
+    /// triple-quoted strings being the motivating case — survive formatting
+    /// byte-for-byte. The layout engine never inserts or rewrites a `Verbatim`;
+    /// it only places it. All wrapping is still expressed with
+    /// `Group`/`Indent`/`Line`/`SoftLine`/`IfBreak`.
+    Verbatim(String),
     /// Concatenation.
     Concat(Vec<Doc>),
     /// A break opportunity: a space when flat, a newline when broken.
@@ -37,6 +45,9 @@ pub enum Doc {
 // Ergonomic constructors.
 pub fn text(s: impl Into<String>) -> Doc {
     Doc::Text(s.into())
+}
+pub fn verbatim(s: impl Into<String>) -> Doc {
+    Doc::Verbatim(s.into())
 }
 pub fn concat(docs: impl IntoIterator<Item = Doc>) -> Doc {
     Doc::Concat(docs.into_iter().collect())
@@ -75,6 +86,13 @@ fn fits(mut width: isize, stack: &[(usize, Mode, &Doc)]) -> bool {
         }
         match doc {
             Doc::Text(s) => width -= s.chars().count() as isize,
+            Doc::Verbatim(s) => {
+                // An embedded newline ends the current line, so the rest fits.
+                if s.contains('\n') {
+                    return true;
+                }
+                width -= s.chars().count() as isize;
+            }
             Doc::Concat(ds) => {
                 for d in ds.iter().rev() {
                     work.push((ind, mode, d));
@@ -112,6 +130,14 @@ pub fn render(doc: &Doc, width: usize) -> String {
             Doc::Text(s) => {
                 out.push_str(s);
                 col += s.chars().count();
+            }
+            Doc::Verbatim(s) => {
+                out.push_str(s);
+                // Column resumes after the last embedded newline (no re-indent).
+                col = match s.rfind('\n') {
+                    Some(i) => s[i + 1..].chars().count(),
+                    None => col + s.chars().count(),
+                };
             }
             Doc::Concat(ds) => {
                 for d in ds.iter().rev() {
