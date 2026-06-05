@@ -1,0 +1,24 @@
+; Minimal Godot project for Phase 0 spike .2 — strict-mode warning extraction.
+; GDScript warnings are explicitly enabled (and the unsafe/untyped family that
+; is off by default) so the analyzer emits them under --check-only --debug.
+
+config_version=5
+
+[application]
+
+config/name="gdstrict-strict-spike"
+config/features=PackedStringArray("4.6")
+
+[debug]
+
+gdscript/warnings/enable=true
+gdscript/warnings/untyped_declaration=1
+gdscript/warnings/inferred_declaration=1
+gdscript/warnings/unsafe_property_access=1
+gdscript/warnings/unsafe_method_access=1
+gdscript/warnings/unsafe_cast=1
+gdscript/warnings/unsafe_call_argument=1
+gdscript/warnings/return_value_discarded=1
+gdscript/warnings/unused_variable=1
+gdscript/warnings/shadowed_variable=1
+gdscript/warnings/integer_division=1
