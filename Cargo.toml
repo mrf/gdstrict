@@ -12,7 +12,7 @@ members = [
 version = "0.0.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/mrf/godot-linter"
+repository = "https://github.com/mrf/gdstrict"
 
 [workspace.dependencies]
 tree-sitter = "0.24"

@@ -1,4 +1,4 @@
 # Beads Project Configuration
-# issue_prefix: godot-linter
+issue_prefix: gdstrict
 # default_priority: 2
 # default_type: task
