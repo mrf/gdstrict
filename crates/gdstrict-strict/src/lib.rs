@@ -40,9 +40,12 @@
 //! is active and removed (or restored) only when the last one finishes.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 
 mod config;
 pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
@@ -296,6 +299,99 @@ pub fn check_script(
         diags.extend(parse_diagnostics(&warns));
     }
     Ok(diags)
+}
+
+/// Default size of the strict worker pool: `max(1, cpu - 2)`.
+///
+/// Each strict check spawns one or two Godot subprocesses (~0.15s each, Phase 0),
+/// so on a big project a serial sweep dominates wall-clock. We leave two cores to
+/// the OS / Godot itself and the calling process rather than saturating every core.
+pub fn default_worker_count() -> usize {
+    let cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    cpus.saturating_sub(2).max(1)
+}
+
+/// Run [`check_script`] over many jobs concurrently via a bounded pool of
+/// [`default_worker_count`] worker threads, returning one result per job **in input
+/// order** regardless of completion order. Each job is a `(project_dir, script_rel)`
+/// pair, exactly as [`check_script`] takes them.
+///
+/// Concurrency is safe by construction against the same project: [`StrictWarnings`]
+/// refcounts the shared `override.cfg` through a process-wide registry (the onh fix),
+/// so overlapping checks of one project share a single correct override and only the
+/// last to finish restores it. This pool simply drives many such checks at once.
+///
+/// **Crash isolation:** a panic inside one job's check is caught and turned into an
+/// `io::Error` for that job alone — every other job still runs and reports. (A Godot
+/// subprocess that crashes does not panic the worker: `Command::output` returns `Ok`
+/// with the failing status, and `check_script` reads its stderr like any other run.)
+pub fn check_scripts(
+    godot: &Path,
+    jobs: &[(PathBuf, String)],
+) -> Vec<std::io::Result<Vec<Diagnostic>>> {
+    parallel_map(jobs.len(), default_worker_count(), |i| {
+        let (project_dir, script_rel) = &jobs[i];
+        check_script(godot, project_dir, script_rel)
+    })
+    .into_iter()
+    // The panic payload is intentionally dropped here: callers only need to know the
+    // job failed, and `check_script`'s real errors are already `io::Error`s. The full
+    // payload survives in `parallel_map`'s `thread::Result` for anyone who wants it.
+    .map(|r| r.unwrap_or_else(|_| Err(std::io::Error::other("strict check panicked"))))
+    .collect()
+}
+
+/// Apply `work(i)` for every `i in 0..n` across a bounded pool of `workers` threads,
+/// returning the results in index order: `result[i]` is the outcome of `work(i)`.
+///
+/// A panic in one `work(i)` is caught (its slot becomes `Err(payload)`) and never
+/// aborts the other items — this is the crash-isolation guarantee the strict pool
+/// relies on. `workers` is clamped to `1..=max(1, n)`, so passing a huge worker count
+/// or `n == 0` is always safe.
+///
+/// Generic and Godot-free so the pool's order-preservation, bound, and panic isolation
+/// can be unit-tested directly (see tests).
+fn parallel_map<T, F>(n: usize, workers: usize, work: F) -> Vec<thread::Result<T>>
+where
+    F: Fn(usize) -> T + Sync,
+    T: Send,
+{
+    if n == 0 {
+        return Vec::new();
+    }
+    let workers = workers.clamp(1, n);
+    // Shared cursor hands out the next job index; each slot is written exactly once
+    // (by the worker that claimed that index), so distinct slots never contend.
+    let cursor = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<thread::Result<T>>>> =
+        (0..n).map(|_| Mutex::new(None)).collect();
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let cursor = &cursor;
+            let slots = &slots;
+            let work = &work;
+            scope.spawn(move || loop {
+                let i = cursor.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let outcome = catch_unwind(AssertUnwindSafe(|| work(i)));
+                *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            });
+        }
+    });
+
+    slots
+        .into_iter()
+        .map(|m| {
+            m.into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .expect("every slot is filled before the scope joins")
+        })
+        .collect()
 }
 
 fn run(godot: &Path, project_dir: &Path, script_rel: &str, debug: bool) -> std::io::Result<String> {
@@ -815,5 +911,130 @@ mod tests {
             "override.cfg leaked after concurrent checks"
         );
         std::fs::remove_dir_all(&project).ok();
+    }
+
+    // --- bounded worker pool (parallel_map / check_scripts) ---
+
+    /// `default_worker_count` never returns 0 (it would mean "no workers" → no work
+    /// ever runs) and stays within the machine's parallelism.
+    #[test]
+    fn worker_count_is_at_least_one() {
+        let n = default_worker_count();
+        assert!(n >= 1, "worker count must be >= 1, got {n}");
+        let cpus = thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1);
+        assert!(n <= cpus.max(1), "worker count {n} exceeds cpu count {cpus}");
+    }
+
+    /// Results come back in input order, `result[i] == work(i)`, no matter which
+    /// worker finished first.
+    #[test]
+    fn parallel_map_preserves_input_order() {
+        let out = parallel_map(6, 3, |i| i * i);
+        let got: Vec<usize> = out.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(got, vec![0, 1, 4, 9, 16, 25]);
+    }
+
+    /// An empty job list does no work and returns an empty vec (no panics, no threads).
+    #[test]
+    fn parallel_map_empty_is_noop() {
+        let out = parallel_map(0, 4, |_i: usize| -> usize { panic!("must not run") });
+        assert!(out.is_empty());
+    }
+
+    /// A panic in one job is isolated: that slot is `Err`, every other slot still ran
+    /// and holds its correct value. This is the crash-isolation guarantee.
+    #[test]
+    fn parallel_map_isolates_panics() {
+        let out = parallel_map(5, 2, |i| {
+            assert_ne!(i, 2, "boom on index 2");
+            i
+        });
+        assert!(out[2].is_err(), "panicking job must surface as Err");
+        for (i, slot) in out.iter().enumerate() {
+            if i == 2 {
+                continue;
+            }
+            assert_eq!(
+                *slot.as_ref().unwrap(),
+                i,
+                "non-panicking job {i} must still produce its value"
+            );
+        }
+    }
+
+    /// The pool honors its bound (never more than `workers` items in flight) while
+    /// still running more than one at a time. A brief sleep widens the overlap window
+    /// so the observed concurrency is reliably > 1 without being flaky.
+    #[test]
+    fn parallel_map_is_bounded_and_concurrent() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        const WORKERS: usize = 4;
+        let inflight = AtomicUsize::new(0);
+        let max_seen = AtomicUsize::new(0);
+
+        let out = parallel_map(16, WORKERS, |i| {
+            let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_seen.fetch_max(now, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            i
+        });
+
+        assert_eq!(out.len(), 16);
+        let peak = max_seen.load(Ordering::SeqCst);
+        assert!(
+            peak <= WORKERS,
+            "pool exceeded its bound: {peak} in flight, cap {WORKERS}"
+        );
+        assert!(
+            peak >= 2,
+            "pool never ran two jobs at once (peak {peak}); not actually concurrent"
+        );
+    }
+
+    /// Live end-to-end: drive `check_scripts` over every script in the acceptance
+    /// corpus — many files sharing ONE project root — and confirm each job comes back
+    /// (in order) and the shared override.cfg is gone afterward. Exercises the bounded
+    /// pool on top of the refcounted override contract. Skipped when no Godot is found.
+    #[test]
+    fn check_scripts_runs_corpus_concurrently() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        let project = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/acceptance"
+        ));
+        let mut rels: Vec<String> = std::fs::read_dir(project.join("stagehand_core"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| format!("stagehand_core/{}", e.file_name().to_string_lossy()))
+            .filter(|n| n.ends_with(".gd"))
+            .collect();
+        rels.sort();
+        assert!(rels.len() >= 2, "need multiple scripts to exercise concurrency");
+
+        let jobs: Vec<(PathBuf, String)> =
+            rels.iter().map(|r| (project.to_path_buf(), r.clone())).collect();
+        let results = check_scripts(&godot, &jobs);
+
+        assert_eq!(results.len(), jobs.len(), "one result per job, in order");
+        for (job, res) in jobs.iter().zip(&results) {
+            assert!(
+                res.is_ok(),
+                "strict check failed for {}: {:?}",
+                job.1,
+                res.as_ref().err()
+            );
+        }
+        assert!(
+            !project.join("override.cfg").exists(),
+            "override.cfg leaked after concurrent check_scripts"
+        );
     }
 }
