@@ -122,6 +122,12 @@ pub fn run(args: &CheckArgs) -> ExitCode {
     // whole point of the tool — promoting the untyped/unsafe family to errors.
     let severity = SeverityConfig::strict();
 
+    // Strict's per-file Godot invocation is the slow part (~0.15s/run, Phase 0), so we
+    // don't run it inline. The serial pass below does the cheap in-memory work
+    // (format-check + lint, both microseconds) and *collects* strict jobs; then we run
+    // them all through a bounded worker pool and fold the results back in file order.
+    let mut strict_jobs: Vec<StrictJob> = Vec::new();
+
     for path in &files {
         let display = path.display().to_string();
         let src = match std::fs::read_to_string(path) {
@@ -160,18 +166,17 @@ pub fn run(args: &CheckArgs) -> ExitCode {
             }
         }
 
-        // ── strict ────────────────────────────────────────────────────────────
-        if let Some(godot) = &godot {
-            run_strict(
-                godot,
-                path,
-                &display,
-                &severity,
-                &mut project_cache,
-                args.quiet,
-                &mut report,
-            );
+        // ── strict (collect only) ─────────────────────────────────────────────
+        if godot.is_some() {
+            if let Some(job) = strict_job_for(path, &display, &mut project_cache, args.quiet) {
+                strict_jobs.push(job);
+            }
         }
+    }
+
+    // ── strict (run concurrently, fold in order) ──────────────────────────────
+    if let Some(godot) = &godot {
+        run_strict_jobs(godot, &severity, &strict_jobs, args.quiet, &mut report);
     }
 
     if !args.quiet {
@@ -180,25 +185,30 @@ pub fn run(args: &CheckArgs) -> ExitCode {
     report.exit_code()
 }
 
-/// Run the strict pass for a single file: locate its enclosing Godot project,
-/// invoke the analyzer, apply the severity profile, and fold results into `report`.
-fn run_strict(
-    godot: &Path,
+/// A unit of strict work: the user-facing display path plus the
+/// `(project_dir, script_rel)` pair [`gdstrict_strict::check_scripts`] consumes.
+struct StrictJob {
+    display: String,
+    project_dir: PathBuf,
+    script_rel: String,
+}
+
+/// Resolve a file into a [`StrictJob`], or `None` when it cannot be type-checked
+/// (no enclosing `project.godot`, or it does not sit under its own project root).
+///
+/// These "skips" are input limitations, not violations, so they are reported (unless
+/// quiet) and dropped without failing the gate — exactly as the old inline path did.
+fn strict_job_for(
     path: &Path,
     display: &str,
-    severity: &SeverityConfig,
     project_cache: &mut HashMap<PathBuf, Option<PathBuf>>,
     quiet: bool,
-    report: &mut Report,
-) {
+) -> Option<StrictJob> {
     let Some(project_dir) = find_project_root(path, project_cache) else {
-        // No enclosing project.godot — Godot's analyzer needs a project, so this
-        // file simply cannot be type-checked. This is an input limitation, not a
-        // violation: note it (unless quiet) and skip without failing the gate.
         if !quiet {
             eprintln!("{display}: skipping strict (no project.godot found above this file)");
         }
-        return;
+        return None;
     };
 
     let Ok(script_rel) = path.strip_prefix(&project_dir) else {
@@ -206,36 +216,66 @@ fn run_strict(
         if !quiet {
             eprintln!("{display}: skipping strict (could not relativize against project root)");
         }
+        return None;
+    };
+
+    Some(StrictJob {
+        display: display.to_string(),
+        project_dir,
+        script_rel: script_rel.to_string_lossy().into_owned(),
+    })
+}
+
+/// Run every collected strict job through the bounded concurrent pool, then fold the
+/// results into `report` **in job (file) order** so output and counts are deterministic
+/// regardless of which file's Godot run finished first. A failed/crashed job is recorded
+/// as an operational error for that file alone and never aborts the rest.
+fn run_strict_jobs(
+    godot: &Path,
+    severity: &SeverityConfig,
+    jobs: &[StrictJob],
+    quiet: bool,
+    report: &mut Report,
+) {
+    if jobs.is_empty() {
         return;
-    };
-    let script_rel = script_rel.to_string_lossy();
+    }
+    let work: Vec<(PathBuf, String)> = jobs
+        .iter()
+        .map(|j| (j.project_dir.clone(), j.script_rel.clone()))
+        .collect();
+    let results = gdstrict_strict::check_scripts(godot, &work);
 
-    let diags = match gdstrict_strict::check_script(godot, &project_dir, &script_rel) {
-        Ok(d) => severity.apply(d),
-        Err(err) => {
-            eprintln!("error: running strict check on {display}: {err}");
-            report.had_error = true;
-            return;
-        }
-    };
+    for (job, result) in jobs.iter().zip(results) {
+        let diags = match result {
+            Ok(d) => severity.apply(d),
+            Err(err) => {
+                eprintln!("error: running strict check on {}: {err}", job.display);
+                report.had_error = true;
+                continue;
+            }
+        };
 
-    for d in diags {
-        let label = match d.severity {
-            Severity::Error => "strict:error",
-            Severity::Warning => "strict:warning",
-        };
-        let code = d.code.unwrap_or("");
-        let code = if code.is_empty() {
-            String::new()
-        } else {
-            format!(" {code}")
-        };
-        match d.severity {
-            Severity::Error => report.violations += 1,
-            Severity::Warning => report.warnings += 1,
-        }
-        if !quiet {
-            eprintln!("{display}:{} [{label}]{code} {}", d.line, d.message);
+        for d in diags {
+            let label = match d.severity {
+                Severity::Error => {
+                    report.violations += 1;
+                    "strict:error"
+                }
+                Severity::Warning => {
+                    report.warnings += 1;
+                    "strict:warning"
+                }
+            };
+            let code = d.code.unwrap_or("");
+            let code = if code.is_empty() {
+                String::new()
+            } else {
+                format!(" {code}")
+            };
+            if !quiet {
+                eprintln!("{}:{} [{label}]{code} {}", job.display, d.line, d.message);
+            }
         }
     }
 }
