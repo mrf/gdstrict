@@ -1,0 +1,5 @@
+# gdstrict is a formatter: its golden fixtures must be byte-stable across every
+# platform, and the formatter itself emits LF line endings. Force LF on checkout
+# everywhere (Windows CI included) so a CRLF conversion never makes a golden
+# `format(in) != out` comparison fail for line-ending reasons alone.
+* text=auto eol=lf
