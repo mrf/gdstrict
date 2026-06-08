@@ -7,19 +7,19 @@
 
 ## Why this exists
 
-Most mature language ecosystems have a settled answer to "how should this code look, and is it actually well typed." Python has `black`, `ruff`, and `mypy`. GDScript has none of those things in one place. The existing pieces are partial and they do not compose into a strict-mode story:
+Most mature language ecosystems have a settled answer to "how should this code look, and is it actually well typed." Python has `black`, `ruff`, and `mypy`. GDScript has excellent tools too, and gdstrict stands on their shoulders. Each was built for a specific job, and no single one covers the full format-plus-strict-typing workflow:
 
-- **gdformat** (from Scony's `gdtoolkit`, written in Python on lark) is the de-facto formatter. It is slow, it has had comment-handling and idempotency bugs, the only knob is line length, and its syntax support has lagged Godot releases before (typed `Dictionary[K, V]` broke for a while).
-- **gdlint** (also gdtoolkit) is a style linter that is purely syntactic. It does zero type or semantic analysis.
-- **GDQuest's GDScript-formatter** (Rust, tree-sitter, Topiary) is fast and useful today, but its Topiary-based engine deliberately does not auto-wrap long lines, and it has no type-aware strict-mode layer.
-- **Godot's own `GDScriptAnalyzer`** is the only real type checker in the ecosystem. It knows about `UNTYPED_DECLARATION`, `INFERRED_DECLARATION`, and the whole `UNSAFE_*` family. But it is locked inside the engine, `--check-only` does not surface warnings cleanly, and there is no batch or programmatic API, which makes it awkward to wire into CI.
+- **gdformat** (from Scony's `gdtoolkit`, written in Python on lark) is the de-facto formatter and the reason most GDScript gets formatted at all. It focuses on a single line-length knob; being a separate reimplementation of the grammar, it occasionally trails new Godot syntax (typed `Dictionary[K, V]` is one example that took a release to catch up).
+- **gdlint** (also gdtoolkit) is a mature style linter. By design it works at the syntactic level, so type-aware and semantic checks are out of its scope.
+- **GDQuest's GDScript-formatter** (Rust, tree-sitter, Topiary) is fast and a pleasure to use. Its Topiary-based engine intentionally leaves long lines as written rather than auto-wrapping them, and it stays focused on formatting and style rather than type-aware strict mode.
+- **Godot's own `GDScriptAnalyzer`** is the real type checker in the ecosystem, and gdstrict's strict mode is built directly on top of it. It knows `UNTYPED_DECLARATION`, `INFERRED_DECLARATION`, and the whole `UNSAFE_*` family. It lives inside the engine, though, and surfacing its warnings cleanly in a batch CI run takes some driving, which is exactly the gap gdstrict's strict-mode layer fills.
 
-The gap is a single standalone tool that does two things well:
+The opportunity is a single standalone tool that does two things well:
 
 1. Formats deterministically, like `black`, with automatic line wrapping.
 2. Enforces strict typing by failing the build on untyped or unsafe code.
 
-Nothing ships that combined workflow today. That is the hole gdstrict fills.
+No single tool ships that combined workflow today. That is the niche gdstrict aims to fill, building on the tools above rather than replacing them.
 
 ## Philosophy
 
@@ -27,9 +27,9 @@ gdstrict is built on a few firm opinions.
 
 **Formatting is not a matter of taste.** The formatter is deterministic, idempotent, and close to zero-config, the same contract that made `black` win. There is exactly one knob, `line-length` (default 100, matching Godot's style guide). You do not configure style. You adopt it, and you stop arguing about it in code review.
 
-**Idempotency is a hard invariant, not a nice-to-have.** `format(format(x))` must equal `format(x)` for every input. This is gated in CI by double-formatting every fixture. Idempotency bugs are the recurring failure mode of the existing tools, so gdstrict treats the invariant as load-bearing from day one.
+**Idempotency is a hard invariant, not a nice-to-have.** `format(format(x))` must equal `format(x)` for every input. This is gated in CI by double-formatting every fixture. Idempotency is genuinely hard to get right, so gdstrict treats the invariant as load-bearing from day one.
 
-**Auto-wrapping is the whole point.** Long call chains, argument lists, and array or dictionary literals wrap to one element per line, with a magic trailing comma that forces the expanded form (the `black` and `ruff` behavior). Refusing to wrap is the gap in the existing fast formatter, and closing it is the reason gdstrict exists.
+**Auto-wrapping is the whole point.** Long call chains, argument lists, and array or dictionary literals wrap to one element per line, with a magic trailing comma that forces the expanded form (the `black` and `ruff` behavior). Auto-wrapping is the capability the other fast formatters intentionally leave out, and providing it is a core reason gdstrict exists.
 
 **Strict mode should mean something real.** Reimplementing GDScript's type system would be a multi-year trap. Instead, gdstrict drives the engine's own analyzer headlessly and parses its diagnostics. The type checking is exactly as accurate as Godot itself, because it is Godot. A `gdstrict.toml` profile maps each warning to `error`, `warn`, or `off`, which gives you the project-wide warnings-as-errors enforcement the engine does not offer out of the box.
 
