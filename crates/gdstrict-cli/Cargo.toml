@@ -22,3 +22,8 @@ toml = "0.8"
 # The formatter engine. The CLI delegates all source-level formatting here via
 # `src/format.rs`, threading the resolved line length in as the target width.
 gdstrict-format = { path = "../gdstrict-format" }
+# The syntactic style linter (CST naming rules). `check` aggregates its findings.
+gdstrict-lint = { path = "../gdstrict-lint" }
+# The strict-typing layer: drives a headless Godot binary to surface UNSAFE_*/
+# UNTYPED_DECLARATION diagnostics. `check` runs this unless `--no-strict`.
+gdstrict-strict = { path = "../gdstrict-strict" }

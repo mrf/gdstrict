@@ -256,3 +256,133 @@ fn bad_config_path_is_an_error() {
         .expect("run gdstrict");
     assert_eq!(code(&out), 1);
 }
+
+// ─── check command ──────────────────────────────────────────────────────────────
+
+/// A clean, canonically-formatted, lint-passing file: `check --no-strict` exits 0.
+#[test]
+fn check_no_strict_passes_clean_file() {
+    let formatted = "extends Node\n\nfunc _ready() -> void:\n\tpass\n";
+    let file = temp_file("check_clean.gd", formatted);
+    let out = Command::new(bin())
+        .args(["check", "--no-strict"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("check: clean"));
+}
+
+/// An unformatted file is a violation: `check --no-strict` exits 1 and says so.
+#[test]
+fn check_no_strict_fails_on_unformatted() {
+    let file = temp_file("check_unformatted.gd", "extends Node   \n\n\n");
+    let out = Command::new(bin())
+        .args(["check", "--no-strict"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(code(&out), 1, "expected findings exit code");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("would reformat"), "stderr: {stderr}");
+    // check must never rewrite files.
+    assert_eq!(fs::read_to_string(&file).unwrap(), "extends Node   \n\n\n");
+}
+
+/// A naming-rule violation is a finding: `check --no-strict` exits 1 with a lint line.
+#[test]
+fn check_no_strict_reports_lint_findings() {
+    // PascalCase function name violates `function-name-case`. Keep it otherwise
+    // canonical so format-check does not also fire (we want to prove lint alone fails).
+    let file = temp_file("check_lint.gd", "func DoThing() -> void:\n\tpass\n");
+    let out = Command::new(bin())
+        .args(["check", "--no-strict"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(code(&out), 1, "expected findings exit code");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[lint:function-name-case]"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `--quiet` suppresses per-finding lines but still sets the exit code.
+#[test]
+fn check_quiet_suppresses_findings_but_keeps_exit_code() {
+    let file = temp_file("check_quiet.gd", "extends Node   \n\n\n");
+    let out = Command::new(bin())
+        .args(["check", "--no-strict", "--quiet"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(code(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("would reformat"),
+        "--quiet should not print findings; stderr: {stderr}"
+    );
+}
+
+/// Strict is enabled by default; an explicit `--godot` that does not exist is a
+/// configuration error (exit 2), distinct from a findings exit (1).
+#[test]
+fn check_missing_godot_is_config_error() {
+    let file = temp_file("check_cfgerr.gd", "extends Node\n");
+    let out = Command::new(bin())
+        .args(["check", "--godot", "/no/such/godot/binary"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        2,
+        "missing Godot while strict is enabled must be a config error (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A non-existent input path is an operational error (exit 2).
+#[test]
+fn check_missing_path_is_config_error() {
+    let out = Command::new(bin())
+        .args(["check", "--no-strict", "/no/such/path/here.gd"])
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(code(&out), 2);
+}
+
+/// End-to-end strict pass against a real Godot binary. The fixture's `unsafe.gd`
+/// is untyped/unsafe, so the strict preset promotes it to errors → exit 1.
+/// Skipped when no Godot is discoverable (CI without Godot, dev box without it).
+#[test]
+fn check_strict_flags_unsafe_fixture_when_godot_present() {
+    if gdstrict_strict::find_godot().is_none() {
+        eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/strict_project/unsafe.gd");
+    let out = Command::new(bin())
+        .args(["check"])
+        .arg(&fixture)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        1,
+        "strict should flag the unsafe fixture; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[strict:error]"),
+        "expected a strict error line; stderr: {stderr}"
+    );
+}

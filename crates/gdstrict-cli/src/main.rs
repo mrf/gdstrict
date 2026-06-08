@@ -3,7 +3,11 @@
 //! Exit codes (CI / pre-commit friendly):
 //!   0  success — files written, or nothing would change under `--check`
 //!   1  under `--check`, at least one file would change; OR an error occurred
+//!
+//! The `check` command (see [`check`]) has its own three-way exit scheme
+//! (0 clean / 1 findings / 2 config error) documented in that module.
 
+mod check;
 mod config;
 mod diff;
 mod format;
@@ -25,6 +29,12 @@ struct Cli {
 enum Command {
     /// Format GDScript (`.gd`) files.
     Format(FormatArgs),
+
+    /// Aggregate gate: format-check + lint + strict, with one unified exit code.
+    ///
+    /// Exit 0 = clean, 1 = findings, 2 = config error (e.g. strict enabled but no
+    /// Godot binary found). Strict is on by default; pass `--no-strict` to skip it.
+    Check(CheckArgs),
 }
 
 #[derive(Args)]
@@ -50,10 +60,38 @@ struct FormatArgs {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct CheckArgs {
+    /// Path to the Godot binary (overrides `$GODOT` and `PATH`). Must exist.
+    #[arg(long, value_name = "PATH")]
+    pub godot: Option<PathBuf>,
+
+    /// Skip the strict-typing pass entirely (no Godot binary required).
+    #[arg(long)]
+    pub no_strict: bool,
+
+    /// Suppress per-finding output; only the summary line and the exit code remain.
+    #[arg(long)]
+    pub quiet: bool,
+
+    /// Use this exact gdstrict.toml instead of discovering one per file.
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// Maximum line length for the format-check (overrides any config file).
+    #[arg(long, value_name = "N")]
+    pub line_length: Option<usize>,
+
+    /// Files or directories to check (directories are walked recursively).
+    #[arg(required = true, value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Format(args) => run_format(&args),
+        Command::Check(args) => check::run(&args),
     }
 }
 
