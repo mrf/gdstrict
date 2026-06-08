@@ -256,3 +256,167 @@ fn bad_config_path_is_an_error() {
         .expect("run gdstrict");
     assert_eq!(code(&out), 1);
 }
+
+// ── lint subcommand ───────────────────────────────────────────────────────────
+
+#[test]
+fn lint_exits_zero_on_clean_file() {
+    let file = temp_file(
+        "lint_clean.gd",
+        "func do_thing() -> void:\n\tpass\n",
+    );
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(
+        code(&out),
+        0,
+        "clean file should exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn lint_exits_nonzero_on_violation() {
+    let file = temp_file(
+        "lint_violation.gd",
+        "func DoThing() -> void:\n\tpass\n",
+    );
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(
+        code(&out),
+        1,
+        "file with PascalCase function should exit 1"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("function-name-case"),
+        "stderr should name the violated rule; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("DoThing"),
+        "stderr should name the offending identifier; got: {stderr}"
+    );
+}
+
+#[test]
+fn lint_reports_line_and_column() {
+    let file = temp_file("lint_location.gd", "func BadName() -> void:\n\tpass\n");
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(code(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Line 1, column 5 (after "func ").
+    assert!(
+        stderr.contains("1:5"),
+        "expected 1:5 location in output; got: {stderr}"
+    );
+}
+
+#[test]
+fn lint_disabled_rule_not_reported() {
+    let dir = scratch("lint-disable-rule");
+    // Disable the function-name-case rule via config.
+    write(
+        &dir.join("gdstrict.toml"),
+        "[lint]\nfunction-name-case = false\n",
+    );
+    let file = dir.join("bad.gd");
+    write(&file, "func DoThing() -> void:\n\tpass\n");
+
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(
+        code(&out),
+        0,
+        "disabled rule should not trigger; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn lint_config_flag_overrides_discovery() {
+    let dir = scratch("lint-config-flag");
+    // Discoverable config enables everything (no disabled rules).
+    write(&dir.join("gdstrict.toml"), "# no lint overrides\n");
+
+    // Explicit config disables function-name-case.
+    let explicit = dir.join("explicit.toml");
+    write(&explicit, "[lint]\nfunction-name-case = false\n");
+
+    let file = dir.join("a.gd");
+    write(&file, "func DoThing() -> void:\n\tpass\n");
+
+    // With --config pointing to the explicit file: rule is off → exit 0.
+    let out = Command::new(bin())
+        .args(["lint", "--config"])
+        .arg(&explicit)
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint --config");
+    assert_eq!(
+        code(&out),
+        0,
+        "explicit config disabling rule should exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Without --config: discovery finds the discoverable config (no disables) → exit 1.
+    let out2 = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint (no --config)");
+    assert_eq!(
+        code(&out2),
+        1,
+        "without explicit config, rule is enabled → violation → exit 1"
+    );
+}
+
+#[test]
+fn lint_walks_directory_recursively() {
+    let dir = scratch("lint-walk");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).expect("create subdir");
+    write(&dir.join("root.gd"), "func do_thing() -> void:\n\tpass\n");
+    write(&sub.join("nested.gd"), "func DoThing() -> void:\n\tpass\n");
+
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&dir)
+        .output()
+        .expect("run gdstrict lint on directory");
+    assert_eq!(
+        code(&out),
+        1,
+        "violation in nested file should propagate; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nested.gd"),
+        "stderr should mention the offending file; got: {stderr}"
+    );
+}
+
+#[test]
+fn lint_missing_path_is_an_error() {
+    let out = Command::new(bin())
+        .args(["lint", "/no/such/path/here.gd"])
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(code(&out), 1);
+}

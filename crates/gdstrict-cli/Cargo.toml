@@ -22,3 +22,4 @@ toml = "0.8"
 # The formatter engine. The CLI delegates all source-level formatting here via
 # `src/format.rs`, threading the resolved line length in as the target width.
 gdstrict-format = { path = "../gdstrict-format" }
+gdstrict-lint = { path = "../gdstrict-lint" }
