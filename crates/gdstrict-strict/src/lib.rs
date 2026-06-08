@@ -47,7 +47,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
+mod classify;
 mod config;
+pub use classify::{classifier_for, detect_version, ClassifierTable, GodotVersion};
 pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +125,8 @@ fn find_godot_in_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf
 ///
 /// gdstrict applies its own severity mapping downstream, so we inject these as plain
 /// warnings (`1`) and decide error-vs-warn ourselves rather than letting Godot fail
-/// the parse via `2` ("Error"). Version-gate this set alongside [`classify_warning`].
+/// the parse via `2` ("Error"). Version-gate this set alongside the message classifier
+/// (see [`classify`]) if a future Godot renames a warning key.
 const STRICT_WARNINGS: &[&str] = &[
     "untyped_declaration",
     "inferred_declaration",
@@ -287,16 +290,20 @@ pub fn check_script(
     // (including on the `?` early returns below).
     let _warnings = StrictWarnings::install(project_dir)?;
 
+    // Detect the binary's version once (cached per path) so the message classifier
+    // uses the table that matches this Godot. `None` falls back to the newest table.
+    let version = detect_version(godot);
+
     // Pass 1: errors (no --debug — safe).
     let errs = run(godot, project_dir, script_rel, false)?;
-    let mut diags = parse_diagnostics(&errs);
+    let mut diags = parse_diagnostics(&errs, version);
     let has_error = diags.iter().any(|d| d.severity == Severity::Error);
 
     // Pass 2: warnings — only when there are no hard errors, to avoid the
     // --debug debugger crash.
     if !has_error {
         let warns = run(godot, project_dir, script_rel, true)?;
-        diags.extend(parse_diagnostics(&warns));
+        diags.extend(parse_diagnostics(&warns, version));
     }
     Ok(diags)
 }
@@ -412,7 +419,12 @@ fn run(godot: &Path, project_dir: &Path, script_rel: &str, debug: bool) -> std::
 
 /// Parse Godot stderr into diagnostics. Pairs each `WARNING:` / `*ERROR:` header
 /// line with the following `at: ... (res://file:line)` locator line.
-pub fn parse_diagnostics(stderr: &str) -> Vec<Diagnostic> {
+///
+/// `version` is the detected Godot version (from [`detect_version`]); it selects the
+/// version-gated message classifier so warning codes match the running release. Pass
+/// `None` when the version is unknown — the newest classifier table is used.
+pub fn parse_diagnostics(stderr: &str, version: Option<GodotVersion>) -> Vec<Diagnostic> {
+    let table = classifier_for(version);
     let lines: Vec<&str> = stderr.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -440,7 +452,7 @@ pub fn parse_diagnostics(stderr: &str) -> Vec<Diagnostic> {
         out.push(Diagnostic {
             severity,
             code: if severity == Severity::Warning {
-                classify_warning(&message)
+                table.classify(&message)
             } else {
                 None
             },
@@ -492,29 +504,6 @@ fn parse_locator(line: &str) -> Option<(String, usize)> {
     // Simple file:line (path may itself contain ':' e.g. res://).
     let path = parts[..n - 1].join(":");
     Some((path, last))
-}
-
-/// Best-effort message → warning code. Templates are stable per Godot version;
-/// version-gate this map when bumping the supported Godot release.
-fn classify_warning(msg: &str) -> Option<&'static str> {
-    let m = msg;
-    if m.contains("has no static type") {
-        Some("UNTYPED_DECLARATION")
-    } else if m.contains("is not present on the inferred type") && m.contains("method") {
-        Some("UNSAFE_METHOD_ACCESS")
-    } else if m.contains("is not present on the inferred type") {
-        Some("UNSAFE_PROPERTY_ACCESS")
-    } else if m.starts_with("Casting") && m.contains("unsafe") {
-        Some("UNSAFE_CAST")
-    } else if m.contains("returns a value that will be discarded") {
-        Some("RETURN_VALUE_DISCARDED")
-    } else if m.starts_with("Integer division") {
-        Some("INTEGER_DIVISION")
-    } else if m.contains("inferred from a Variant value") {
-        Some("INFERRED_DECLARATION")
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -575,7 +564,7 @@ mod tests {
     #[test]
     fn parses_warning_block() {
         let stderr = "WARNING: Variable \"thing\" has no static type.\n     at: GDScript::reload (res://unsafe.gd:7)\n";
-        let d = parse_diagnostics(stderr);
+        let d = parse_diagnostics(stderr, Some(GodotVersion::new(4, 6, 2)));
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].severity, Severity::Warning);
         assert_eq!(d[0].file, "res://unsafe.gd");
@@ -586,7 +575,7 @@ mod tests {
     #[test]
     fn parses_error_block() {
         let stderr = "SCRIPT ERROR: Parse Error: Function \"x()\" not found in base self.\n          at: GDScript::reload (res://broken.gd:4)\n";
-        let d = parse_diagnostics(stderr);
+        let d = parse_diagnostics(stderr, None);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].severity, Severity::Error);
         assert_eq!(d[0].line, 4);
@@ -765,13 +754,15 @@ mod tests {
 
     #[test]
     fn find_godot_skips_non_executable_file() {
-        let (dir, fake) = make_fake_godot("find-non-exec", false);
+        // `_fake` is consumed only by the Windows branch; underscore keeps the Unix
+        // build clippy-clean (unused otherwise) while staying usable there.
+        let (dir, _fake) = make_fake_godot("find-non-exec", false);
         // On Unix, mode 0o644 has no execute bit — must not be found.
         #[cfg(unix)]
         assert_eq!(find_godot_in_dirs([dir.clone()]), None);
         // On Windows every existing file is treated as executable.
         #[cfg(not(unix))]
-        assert_eq!(find_godot_in_dirs([dir.clone()]), Some(fake));
+        assert_eq!(find_godot_in_dirs([dir.clone()]), Some(_fake));
         std::fs::remove_dir_all(&dir).ok();
     }
 
