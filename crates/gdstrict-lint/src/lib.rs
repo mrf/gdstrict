@@ -65,6 +65,12 @@ impl<'src> LintContext<'src> {
         node.utf8_text(self.source.as_bytes()).unwrap_or("")
     }
 
+    /// The raw source text being linted. Exposed for rules that need to walk
+    /// subtrees outside the `report` flow (e.g. [`rules::UnusedArgument`]).
+    pub(crate) fn source(&self) -> &'src str {
+        self.source
+    }
+
     /// Record a finding located at `node`'s start position.
     pub fn report(
         &mut self,
