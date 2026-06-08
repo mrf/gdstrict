@@ -48,7 +48,10 @@ mod tests {
             gdstrict_syntax::defects(&gdstrict_syntax::parse(&once))
         );
         let twice = format(&once);
-        assert_eq!(once, twice, "not idempotent\n--- once ---\n{once}\n--- twice ---\n{twice}");
+        assert_eq!(
+            once, twice,
+            "not idempotent\n--- once ---\n{once}\n--- twice ---\n{twice}"
+        );
         once
     }
 
@@ -106,7 +109,10 @@ func f() -> void:
     #[test]
     fn array_and_dict_literals() {
         let out = check_roundtrip("var a := [1, 2, 3]\nvar d := {1: \"one\", 2: \"two\"}\n");
-        assert_eq!(out, "var a := [1, 2, 3]\nvar d := {1: \"one\", 2: \"two\"}\n");
+        assert_eq!(
+            out,
+            "var a := [1, 2, 3]\nvar d := {1: \"one\", 2: \"two\"}\n"
+        );
     }
 
     #[test]
@@ -137,7 +143,11 @@ func f(n: int) -> void:
         let out = check_roundtrip("func f() -> void:\n\tvar a := 1\n\n\tvar b := 2\n");
         assert_eq!(out, "func f() -> void:\n\tvar a := 1\n\n\tvar b := 2\n");
         for line in out.lines() {
-            assert_eq!(line, line.trim_end(), "trailing whitespace in line: {line:?}");
+            assert_eq!(
+                line,
+                line.trim_end(),
+                "trailing whitespace in line: {line:?}"
+            );
         }
     }
 
@@ -145,7 +155,10 @@ func f(n: int) -> void:
     fn multiline_string_preserved_byte_exact() {
         let src = "var t := \"\"\"\n\tmulti\n\tline\n\"\"\"\n";
         let out = check_roundtrip(src);
-        assert!(out.contains("\"\"\"\n\tmulti\n\tline\n\"\"\""), "got:\n{out}");
+        assert!(
+            out.contains("\"\"\"\n\tmulti\n\tline\n\"\"\""),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -173,9 +186,7 @@ func f(n: int) -> void:
     fn property_with_get_set_roundtrips() {
         // Property accessor bodies use the verbatim fallback; they must still
         // re-parse and be idempotent.
-        check_roundtrip(
-            "var hp := 100:\n\tget:\n\t\treturn hp\n\tset(value):\n\t\thp = value\n",
-        );
+        check_roundtrip("var hp := 100:\n\tget:\n\t\treturn hp\n\tset(value):\n\t\thp = value\n");
     }
 
     // --- comment & blank-line trivia (integration over the real lowering) ----
@@ -196,7 +207,10 @@ func f(n: int) -> void:
             lines[ci + 1].starts_with("func foo"),
             "leading comment must sit directly above the func; got:\n{out}"
         );
-        assert!(out.contains("\tprint(x)"), "body must be reformatted; got:\n{out}");
+        assert!(
+            out.contains("\tprint(x)"),
+            "body must be reformatted; got:\n{out}"
+        );
     }
 
     #[test]
@@ -204,7 +218,10 @@ func f(n: int) -> void:
         // The inline comment must NOT be relocated to its own line, and the
         // statement it trails is still normalized (`var x:int=5`).
         let out = check_roundtrip("func foo():\n\tvar x:int=5  # the counter\n");
-        let line = out.lines().find(|l| l.contains("var x")).expect("var line present");
+        let line = out
+            .lines()
+            .find(|l| l.contains("var x"))
+            .expect("var line present");
         assert_eq!(
             line, "\tvar x: int = 5  # the counter",
             "inline comment must stay inline with the reformatted statement; got:\n{out}"
@@ -217,7 +234,10 @@ func f(n: int) -> void:
         let a = out.find("## A documented").expect("doc line 1 present");
         let b = out.find("## Second doc").expect("doc line 2 present");
         let c = out.find("class_name Foo").expect("decl present");
-        assert!(a < b && b < c, "doc block order must be preserved; got:\n{out}");
+        assert!(
+            a < b && b < c,
+            "doc block order must be preserved; got:\n{out}"
+        );
     }
 
     #[test]
@@ -290,17 +310,26 @@ func greet(name):
         assert_eq!(arr, "var a := [\n\t1,\n\t2,\n\t3,\n]\n", "got:\n{arr}");
 
         let dict = check_roundtrip("var d := {\"a\": 1, \"b\": 2,}\n");
-        assert_eq!(dict, "var d := {\n\t\"a\": 1,\n\t\"b\": 2,\n}\n", "got:\n{dict}");
+        assert_eq!(
+            dict, "var d := {\n\t\"a\": 1,\n\t\"b\": 2,\n}\n",
+            "got:\n{dict}"
+        );
 
         let call = check_roundtrip("func f():\n\tg(alpha, beta,)\n");
-        assert_eq!(call, "func f():\n\tg(\n\t\talpha,\n\t\tbeta,\n\t)\n", "got:\n{call}");
+        assert_eq!(
+            call, "func f():\n\tg(\n\t\talpha,\n\t\tbeta,\n\t)\n",
+            "got:\n{call}"
+        );
     }
 
     /// The mirror case: without an input trailing comma, the same collections
     /// collapse to one line when they fit — magic-comma did not over-break.
     #[test]
     fn no_trailing_comma_collapses_when_it_fits() {
-        assert_eq!(check_roundtrip("var a := [1, 2, 3]\n"), "var a := [1, 2, 3]\n");
+        assert_eq!(
+            check_roundtrip("var a := [1, 2, 3]\n"),
+            "var a := [1, 2, 3]\n"
+        );
         assert_eq!(
             check_roundtrip("var d := {\"a\": 1, \"b\": 2}\n"),
             "var d := {\"a\": 1, \"b\": 2}\n"

@@ -194,7 +194,10 @@ mod tests {
         let dir = scratch("empty-config");
         fs::write(dir.join("gdstrict.toml"), "# nothing here\n").unwrap();
         let mut r = Resolver::new(None, None).unwrap();
-        assert_eq!(r.line_length_for(&dir.join("x.gd")).unwrap(), DEFAULT_LINE_LENGTH);
+        assert_eq!(
+            r.line_length_for(&dir.join("x.gd")).unwrap(),
+            DEFAULT_LINE_LENGTH
+        );
     }
 
     #[test]

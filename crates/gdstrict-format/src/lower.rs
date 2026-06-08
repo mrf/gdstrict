@@ -77,10 +77,20 @@ fn delimited(open: &str, items: Vec<Doc>, close: &str, force_break: bool) -> Doc
         // `Group`, so it always expands. The trailing comma is unconditional here
         // (`text(",")`) rather than `trailing_comma()` since there is no flat mode.
         let inner = interleave(items, Doc::HardLine, Doc::HardLine, text(","));
-        return concat([text(open), indent(concat(inner)), Doc::HardLine, text(close)]);
+        return concat([
+            text(open),
+            indent(concat(inner)),
+            Doc::HardLine,
+            text(close),
+        ]);
     }
     let inner = interleave(items, Doc::SoftLine, Doc::Line, trailing_comma());
-    group(concat([text(open), indent(concat(inner)), Doc::SoftLine, text(close)]))
+    group(concat([
+        text(open),
+        indent(concat(inner)),
+        Doc::SoftLine,
+        text(close),
+    ]))
 }
 
 /// Interleave wrappable list `items` into the inner doc sequence shared by both
@@ -262,11 +272,29 @@ fn annotations_prefix(node: Node, ref_row: usize, src: &str) -> Doc {
 pub fn lower(n: Node, src: &str) -> Doc {
     match n.kind() {
         // ---- leaves / atoms ----
-        "identifier" | "name" | "integer" | "float" | "string" | "string_name" | "node_path"
-        | "get_node" | "true" | "false" | "null" | "comment" | "static_keyword"
-        | "region_start" | "region_end" | "region_label" | "pattern_open_ending"
-        | "escape_sequence" | "line_continuation" | "breakpoint_statement" | "pass_statement"
-        | "break_statement" | "continue_statement" => leaf(src, n),
+        "identifier"
+        | "name"
+        | "integer"
+        | "float"
+        | "string"
+        | "string_name"
+        | "node_path"
+        | "get_node"
+        | "true"
+        | "false"
+        | "null"
+        | "comment"
+        | "static_keyword"
+        | "region_start"
+        | "region_end"
+        | "region_label"
+        | "pattern_open_ending"
+        | "escape_sequence"
+        | "line_continuation"
+        | "breakpoint_statement"
+        | "pass_statement"
+        | "break_statement"
+        | "continue_statement" => leaf(src, n),
 
         // A `type` wraps a single identifier / subscript / inferred_type.
         "type" => named_children(n)
@@ -300,7 +328,9 @@ pub fn lower(n: Node, src: &str) -> Doc {
             None => leaf(src, n),
         },
 
-        "variable_statement" | "const_statement" | "export_variable_statement"
+        "variable_statement"
+        | "const_statement"
+        | "export_variable_statement"
         | "onready_variable_statement" => variable_like(n, src),
 
         "function_definition" | "constructor_definition" => def(n, src),
@@ -377,7 +407,10 @@ pub fn lower(n: Node, src: &str) -> Doc {
             let items: Vec<Doc> = named_children(n).iter().map(|c| lower(*c, src)).collect();
             join(items, text(", "))
         }
-        "attribute" => join(named_children(n).iter().map(|c| lower(*c, src)).collect(), text(".")),
+        "attribute" => join(
+            named_children(n).iter().map(|c| lower(*c, src)).collect(),
+            text("."),
+        ),
 
         "binary_operator" => concat([
             expr_field(n, "left", src),
@@ -533,7 +566,10 @@ fn variable_like(n: Node, src: &str) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     parts.push(annotations_prefix(n, name.start_position().row, src));
 
-    if named_children(n).iter().any(|c| c.kind() == "static_keyword") {
+    if named_children(n)
+        .iter()
+        .any(|c| c.kind() == "static_keyword")
+    {
         parts.push(text("static "));
     }
     let keyword = if n.kind() == "const_statement" {

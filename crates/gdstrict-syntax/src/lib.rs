@@ -78,7 +78,9 @@ mod tests {
 
     #[test]
     fn trivial_script_parses_clean() {
-        assert!(parses_clean("extends Node\n\nfunc _ready() -> void:\n\tpass\n"));
+        assert!(parses_clean(
+            "extends Node\n\nfunc _ready() -> void:\n\tpass\n"
+        ));
     }
 
     #[test]

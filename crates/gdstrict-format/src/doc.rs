@@ -168,11 +168,7 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 // Decide this group's mode by trying it flat *together with* the
                 // content that will share its line afterwards (the rest of the
                 // work stack), up to the next hard break. See `fits`.
-                let flat_fits = fits(
-                    width as isize - col as isize,
-                    (ind, Mode::Flat, d),
-                    &stack,
-                );
+                let flat_fits = fits(width as isize - col as isize, (ind, Mode::Flat, d), &stack);
                 let m = if flat_fits { Mode::Flat } else { Mode::Break };
                 stack.push((ind, m, d));
             }
@@ -275,10 +271,7 @@ configure_the_whole_system(
         // Fits in 100 but not in 20 → same doc, width drives the decision.
         let d = call("foo", &["alpha", "beta", "gamma"]);
         assert_eq!(render(&d, 100), "foo(alpha, beta, gamma)");
-        assert_eq!(
-            render(&d, 20),
-            "foo(\n\talpha,\n\tbeta,\n\tgamma,\n)"
-        );
+        assert_eq!(render(&d, 20), "foo(\n\talpha,\n\tbeta,\n\tgamma,\n)");
     }
 
     /// A nested group must break when the *combined* line — the group plus the
@@ -324,11 +317,14 @@ foo(
     /// the CST->Doc lowering, which is Phase 1.)
     #[test]
     fn render_is_deterministic() {
-        let d = call("configure_the_whole_system", &[
-            "first_long_argument_name",
-            "second_long_argument_name",
-            "third_long_argument_name",
-        ]);
+        let d = call(
+            "configure_the_whole_system",
+            &[
+                "first_long_argument_name",
+                "second_long_argument_name",
+                "third_long_argument_name",
+            ],
+        );
         let a = render(&d, 100);
         let b = render(&d, 100);
         assert_eq!(a, b);

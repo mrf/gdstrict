@@ -36,7 +36,10 @@ fn collect_pairs() -> Vec<(PathBuf, PathBuf)> {
 #[test]
 fn golden_fixtures() {
     let pairs = collect_pairs();
-    assert!(!pairs.is_empty(), "no *.in.gd fixtures found in fixtures/format/");
+    assert!(
+        !pairs.is_empty(),
+        "no *.in.gd fixtures found in fixtures/format/"
+    );
 
     let mut failures: Vec<String> = Vec::new();
 

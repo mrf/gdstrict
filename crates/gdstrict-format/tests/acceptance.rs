@@ -43,7 +43,11 @@ fn corpus_files() -> Vec<PathBuf> {
 #[test]
 fn corpus_formats_parse_safe() {
     let files = corpus_files();
-    assert!(!files.is_empty(), "no .gd fixtures found in {}", corpus_dir().display());
+    assert!(
+        !files.is_empty(),
+        "no .gd fixtures found in {}",
+        corpus_dir().display()
+    );
     for path in &files {
         let src = std::fs::read_to_string(path).unwrap();
         let formatted = gdstrict_format::format(&src);
@@ -60,7 +64,11 @@ fn corpus_formats_parse_safe() {
 #[test]
 fn corpus_formats_idempotent() {
     let files = corpus_files();
-    assert!(!files.is_empty(), "no .gd fixtures found in {}", corpus_dir().display());
+    assert!(
+        !files.is_empty(),
+        "no .gd fixtures found in {}",
+        corpus_dir().display()
+    );
     for path in &files {
         let src = std::fs::read_to_string(path).unwrap();
         let once = gdstrict_format::format(&src);

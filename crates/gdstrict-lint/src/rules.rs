@@ -48,6 +48,11 @@ fn is_screaming_snake_case(s: &str) -> bool {
 /// Shared body for the six "simple" rules: match one node kind, read one named
 /// field, apply a predicate, and report if it fails. Handles the early-return
 /// pattern so each `check` impl becomes a one-liner.
+//
+// Eight parameters reads high, but each is a distinct, orthogonal knob for the
+// six naming rules that share this body; bundling them into a struct would just
+// move the noise to every call site without making the contract clearer.
+#[allow(clippy::too_many_arguments)]
 fn check_named_field(
     node: Node,
     ctx: &mut LintContext,
@@ -639,11 +644,23 @@ mod tests {
         let diags = lint(src);
         let rules: Vec<&str> = diags.iter().map(|d| d.rule).collect();
         assert!(rules.contains(&"signal-name-case"), "missing signal rule");
-        assert!(rules.contains(&"constant-name-case"), "missing constant rule");
-        assert!(rules.contains(&"variable-name-case"), "missing variable rule");
+        assert!(
+            rules.contains(&"constant-name-case"),
+            "missing constant rule"
+        );
+        assert!(
+            rules.contains(&"variable-name-case"),
+            "missing variable rule"
+        );
         assert!(rules.contains(&"enum-name-case"), "missing enum-name rule");
-        assert!(rules.contains(&"enum-value-case"), "missing enum-value rule");
-        assert!(rules.contains(&"function-name-case"), "missing function rule");
+        assert!(
+            rules.contains(&"enum-value-case"),
+            "missing enum-value rule"
+        );
+        assert!(
+            rules.contains(&"function-name-case"),
+            "missing function rule"
+        );
         assert!(rules.contains(&"parameter-name-case"), "missing param rule");
     }
 }

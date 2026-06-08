@@ -378,7 +378,10 @@ mod tests {
 
     #[test]
     fn locator_no_line_returns_none() {
-        assert_eq!(parse_locator("     at: GDScript::reload (res://path.gd)"), None);
+        assert_eq!(
+            parse_locator("     at: GDScript::reload (res://path.gd)"),
+            None
+        );
     }
 
     #[test]
@@ -435,7 +438,10 @@ mod tests {
             let written = std::fs::read_to_string(&override_path).unwrap();
             assert!(written.contains("gdscript/warnings/unsafe_method_access=1"));
         }
-        assert!(!override_path.exists(), "override.cfg must be removed on drop");
+        assert!(
+            !override_path.exists(),
+            "override.cfg must be removed on drop"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -463,8 +469,10 @@ mod tests {
     /// if the const and the fixture drift apart. No Godot needed.
     #[test]
     fn inject_fixture_disables_every_strict_warning() {
-        let project_godot =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/strict_inject_project/project.godot");
+        let project_godot = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_inject_project/project.godot"
+        );
         let text = std::fs::read_to_string(project_godot).unwrap();
         for w in STRICT_WARNINGS {
             assert!(
@@ -518,7 +526,10 @@ mod tests {
             eprintln!("godot not runnable; skipping");
             return;
         }
-        let project = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/strict_inject_project");
+        let project = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_inject_project"
+        );
         let override_path = Path::new(project).join("override.cfg");
 
         let diags = check_script(&godot, Path::new(project), "unsafe.gd").unwrap();

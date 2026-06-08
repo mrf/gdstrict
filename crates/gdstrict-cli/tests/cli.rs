@@ -54,7 +54,12 @@ fn check_passes_on_already_formatted_file() {
         .arg(&file)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // --check must not rewrite the file.
     assert_eq!(fs::read_to_string(&file).unwrap(), formatted);
 }
@@ -67,7 +72,11 @@ fn check_fails_on_unformatted_file() {
         .arg(&file)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&out), 1, "expected exit 1 for a file that would change");
+    assert_eq!(
+        code(&out),
+        1,
+        "expected exit 1 for a file that would change"
+    );
     // Still must not have written anything.
     assert_eq!(fs::read_to_string(&file).unwrap(), "extends Node   \n\n\n");
     assert!(String::from_utf8_lossy(&out.stderr).contains("would reformat"));
@@ -103,7 +112,10 @@ fn diff_prints_unified_diff_without_writing() {
         .expect("run gdstrict");
     assert_eq!(code(&out), 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("@@"), "expected a unified-diff hunk:\n{stdout}");
+    assert!(
+        stdout.contains("@@"),
+        "expected a unified-diff hunk:\n{stdout}"
+    );
     // --diff never writes.
     assert_eq!(fs::read_to_string(&file).unwrap(), "extends Node   \n");
 }
@@ -131,7 +143,12 @@ fn config_discovered_from_parent_directory() {
         .arg(&file)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // At width 20 the array wraps to multiple lines.
     let formatted = fs::read_to_string(&file).unwrap();
@@ -168,7 +185,11 @@ fn line_length_flag_overrides_config() {
         .arg(&file)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&discovered), 1, "discovered narrow config should force a change");
+    assert_eq!(
+        code(&discovered),
+        1,
+        "discovered narrow config should force a change"
+    );
 }
 
 #[test]
@@ -185,7 +206,12 @@ fn gdignored_file_is_skipped() {
         .arg(&dir)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The ignored file is left untouched; the other is formatted.
     assert_eq!(fs::read_to_string(&ignored).unwrap(), "extends Node   \n");
@@ -206,7 +232,12 @@ fn gd_file_under_gitignored_dir_is_not_formatted() {
         .arg(&dir)
         .output()
         .expect("run gdstrict");
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The gitignored file is never visited; the tracked file is formatted.
     assert_eq!(fs::read_to_string(&buried).unwrap(), "extends Node   \n");
