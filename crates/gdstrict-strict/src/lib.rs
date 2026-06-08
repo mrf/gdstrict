@@ -72,18 +72,25 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Locate a Godot binary: `$GODOT` env var (must exist), else `godot` on PATH.
+/// Locate a Godot binary: `$GODOT` env var (must be executable), else `godot` on PATH.
 /// Returns `None` when neither is found, so callers can skip gracefully.
 pub fn find_godot() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("GODOT") {
         let pb = PathBuf::from(p);
-        if pb.exists() {
+        if is_executable(&pb) {
             return Some(pb);
         }
     }
     // Search PATH explicitly so None is a real signal, not a deferred spawn failure.
     let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
+    find_godot_in_dirs(std::env::split_paths(&path_var))
+}
+
+/// Search `dirs` for a `godot` executable; returns the first match or `None`.
+/// Extracted from [`find_godot`] so tests can inject a controlled directory list
+/// without touching the process environment.
+fn find_godot_in_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    for dir in dirs {
         let candidate = dir.join("godot");
         if is_executable(&candidate) {
             return Some(candidate);
@@ -481,6 +488,56 @@ mod tests {
                  STRICT_WARNINGS and the fixture have drifted"
             );
         }
+    }
+
+    // --- find_godot_in_dirs unit tests (no env-var mutation, thread-safe) ---
+
+    #[test]
+    fn find_godot_absent_when_dir_has_no_godot() {
+        let (dir, _fake) = make_fake_godot("find-absent", false);
+        assert_eq!(find_godot_in_dirs([dir.clone()]), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_godot_absent_when_path_is_empty() {
+        // An empty iterator must yield None, not fall back to a bare "godot".
+        assert_eq!(find_godot_in_dirs(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn find_godot_present_when_executable_exists() {
+        let (dir, fake) = make_fake_godot("find-present", true);
+        assert_eq!(find_godot_in_dirs([dir.clone()]), Some(fake));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_godot_skips_non_executable_file() {
+        let (dir, fake) = make_fake_godot("find-non-exec", false);
+        // On Unix, mode 0o644 has no execute bit — must not be found.
+        #[cfg(unix)]
+        assert_eq!(find_godot_in_dirs([dir.clone()]), None);
+        // On Windows every existing file is treated as executable.
+        #[cfg(not(unix))]
+        assert_eq!(find_godot_in_dirs([dir.clone()]), Some(fake));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Creates a scratch dir with a `godot` file inside it. When `executable`
+    /// is true the file gets the execute bit set (Unix) so `is_executable` accepts it.
+    /// Returns `(dir, godot_path)`.
+    fn make_fake_godot(tag: &str, executable: bool) -> (PathBuf, PathBuf) {
+        let dir = scratch_dir(tag);
+        let fake = dir.join("godot");
+        std::fs::write(&fake, b"#!/bin/sh\necho godot 4.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        (dir, fake)
     }
 
     /// Per-test scratch dir under the target dir (no external temp-dir crate).
