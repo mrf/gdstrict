@@ -32,9 +32,17 @@
 //! Godot reads `override.cfg` on top of `project.godot`, so this wins regardless of
 //! the project's settings without mutating `project.godot` itself. The file is
 //! restored (or removed) on drop, including on early return. See [`StrictWarnings`].
+//!
+//! Because the override lives at the shared project root, concurrent checks of the
+//! same project (the Phase 2 worker pool) would otherwise race on the file — one
+//! check's drop could delete the override another check still needs. [`StrictWarnings`]
+//! is therefore refcounted per project: the override is installed once while any check
+//! is active and removed (or restored) only when the last one finishes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 mod config;
 pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
@@ -136,6 +144,37 @@ fn strict_override_cfg() -> String {
     s
 }
 
+/// Per-project refcount state for the shared `override.cfg`.
+struct OverrideRef {
+    /// Number of live [`StrictWarnings`] guards for this project.
+    count: usize,
+    /// Prior `override.cfg` bytes to restore, or `None` if we created it fresh.
+    /// Captured once, by the first guard; restored once, by the last to drop.
+    prior: Option<Vec<u8>>,
+}
+
+/// Process-wide registry mapping a (canonicalized) project dir to its [`OverrideRef`].
+///
+/// The override.cfg lives at the shared project root, so concurrent checks of one
+/// project must coordinate: the first guard installs the file and captures the prior
+/// state, later guards merely join the refcount, and only the last guard to drop
+/// restores/removes the file. The mutex is held only briefly during install and drop —
+/// never across the Godot subprocess run — so concurrent checks still proceed in
+/// parallel; they just don't clobber each other's override.cfg.
+fn override_registry() -> &'static Mutex<HashMap<PathBuf, OverrideRef>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, OverrideRef>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Lock the registry, recovering from a poisoned mutex. A panic in another check while
+/// holding the lock must not wedge every subsequent check — the map is plain data and
+/// safe to keep using, so we take the inner guard rather than propagating the panic.
+fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<PathBuf, OverrideRef>> {
+    override_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// RAII guard that installs gdstrict's [`STRICT_WARNINGS`] as a Godot `override.cfg`
 /// at the project root for the duration of a check, then restores the prior state on
 /// drop. Because Godot reads `override.cfg` on top of `project.godot`, this forces the
@@ -145,33 +184,72 @@ fn strict_override_cfg() -> String {
 /// drop; otherwise the file we created is removed. Drop runs on early return too, so
 /// the project is left as we found it even when a Godot pass errors.
 ///
-/// Concurrency caveat: the override lives at the shared project root, so two checks of
-/// the same project at once race on the file. The current API is one script per call;
-/// the Phase 2 concurrent worker pool must serialize the install or isolate per check.
+/// **Concurrency:** guards for the same project are refcounted through
+/// [`override_registry`]. The first guard writes the file and records the prior bytes;
+/// concurrent guards just increment the count and reuse the already-installed override
+/// (every guard writes byte-identical strict content, so the file is always correct
+/// while any guard is alive). The file is restored/removed only when the last guard for
+/// that project drops, so no check can have its override deleted out from under it by
+/// another check finishing first.
 struct StrictWarnings {
+    /// Path to the override.cfg this guard manages.
     path: PathBuf,
-    /// Prior `override.cfg` bytes to restore, or `None` if we created it fresh.
-    prior: Option<Vec<u8>>,
+    /// Registry key: the canonicalized project dir (falls back to the given path).
+    key: PathBuf,
 }
 
 impl StrictWarnings {
-    /// Write the strict `override.cfg` into `project_dir`, capturing any prior file.
+    /// Join (or start) the refcounted strict `override.cfg` for `project_dir`.
+    ///
+    /// The first guard for a project captures any prior file and writes the strict
+    /// override; later concurrent guards reuse it. Returns once the override is in
+    /// place, holding the registry lock only for the install itself.
     fn install(project_dir: &Path) -> std::io::Result<Self> {
         let path = project_dir.join("override.cfg");
-        let prior = match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
-        std::fs::write(&path, strict_override_cfg())?;
-        Ok(Self { path, prior })
+        // Canonicalize so different spellings of the same project dir collapse to one
+        // refcount entry; fall back to the raw path if the dir can't be canonicalized.
+        let key = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+
+        let mut reg = lock_registry();
+        match reg.get_mut(&key) {
+            // Another check already installed the override; just join its refcount.
+            // The on-disk content is identical strict config, so nothing to rewrite.
+            Some(state) => {
+                state.count += 1;
+            }
+            // First check for this project: capture prior file and write strict config.
+            None => {
+                let prior = match std::fs::read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+                std::fs::write(&path, strict_override_cfg())?;
+                reg.insert(key.clone(), OverrideRef { count: 1, prior });
+            }
+        }
+        Ok(Self { path, key })
     }
 }
 
 impl Drop for StrictWarnings {
     fn drop(&mut self) {
+        // Hold the registry lock across the refcount decrement *and* the filesystem
+        // restore so no concurrent install can sneak in between deciding to remove the
+        // file and actually removing it.
+        let mut reg = lock_registry();
+        let Some(state) = reg.get_mut(&self.key) else {
+            return;
+        };
+        state.count -= 1;
+        if state.count > 0 {
+            // Other checks still need the override; leave it in place.
+            return;
+        }
+        // Last guard for this project: restore prior state, then forget the entry.
         // Best-effort restore; failures here must not mask the check's result.
-        match &self.prior {
+        let prior = reg.remove(&self.key).and_then(|s| s.prior);
+        match prior {
             Some(bytes) => {
                 let _ = std::fs::write(&self.path, bytes);
             }
@@ -463,6 +541,83 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Refcount race regression: while one guard is still alive, a second guard's
+    /// drop must NOT remove the shared override.cfg. With the old non-refcounted guard
+    /// the first drop deleted the file out from under the surviving check, silently
+    /// suppressing its warnings. No Godot needed.
+    #[test]
+    fn concurrent_guards_keep_override_until_last_drop() {
+        let dir = scratch_dir("concurrent");
+        let override_path = dir.join("override.cfg");
+        assert!(!override_path.exists());
+
+        let g1 = StrictWarnings::install(&dir).unwrap();
+        assert!(override_path.exists(), "first guard installs the override");
+        {
+            let g2 = StrictWarnings::install(&dir).unwrap();
+            assert!(override_path.exists());
+            // First guard drops while the second is still active.
+            drop(g1);
+            assert!(
+                override_path.exists(),
+                "override.cfg must survive while another check still holds a guard"
+            );
+            let live = std::fs::read_to_string(&override_path).unwrap();
+            assert!(
+                live.contains("gdscript/warnings/unsafe_method_access=1"),
+                "surviving guard must still see strict content, got:\n{live}"
+            );
+            drop(g2);
+        }
+        assert!(
+            !override_path.exists(),
+            "override.cfg is removed only after the last guard drops"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Stress the refcount under real threads: many guards install/hold/drop against one
+    /// project concurrently, and no thread may ever observe the override missing or with
+    /// non-strict content while it holds a guard. This is the property the worker pool
+    /// relies on — warnings are never lost to a racing drop. No Godot needed.
+    #[test]
+    fn many_threads_never_observe_missing_override() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = Arc::new(scratch_dir("threads"));
+        let lost = Arc::new(AtomicBool::new(false));
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let dir = Arc::clone(&dir);
+                let lost = Arc::clone(&lost);
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        let _g = StrictWarnings::install(&dir).unwrap();
+                        // While we hold a guard the override must be present & strict.
+                        match std::fs::read_to_string(dir.join("override.cfg")) {
+                            Ok(s) if s.contains("gdscript/warnings/unsafe_method_access=1") => {}
+                            _ => lost.store(true, Ordering::SeqCst),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(
+            !lost.load(Ordering::SeqCst),
+            "a concurrent guard saw the override.cfg missing or non-strict"
+        );
+        assert!(
+            !dir.join("override.cfg").exists(),
+            "override.cfg must be gone once every guard has dropped"
+        );
+        std::fs::remove_dir_all(&*dir).ok();
+    }
+
     /// Drift guard: the hostile inject fixture must explicitly set *every*
     /// [`STRICT_WARNINGS`] key to `0`, so the live injection test genuinely proves we
     /// override a project that disables the full set (not just Godot defaults). Fails
@@ -481,6 +636,17 @@ mod tests {
                  STRICT_WARNINGS and the fixture have drifted"
             );
         }
+    }
+
+    /// A Godot binary that is present *and* actually runnable, or `None` to skip a
+    /// live test. Folds the `find_godot()` + `--version` checks the Godot-gated tests
+    /// share so they don't drift apart.
+    fn runnable_godot() -> Option<PathBuf> {
+        let godot = find_godot()?;
+        if Command::new(&godot).arg("--version").output().is_err() {
+            return None;
+        }
+        Some(godot)
     }
 
     /// Per-test scratch dir under the target dir (no external temp-dir crate).
@@ -518,14 +684,10 @@ mod tests {
     /// target's config. Skipped when no Godot is available.
     #[test]
     fn live_injection_overrides_hostile_project() {
-        let Some(godot) = find_godot() else {
-            eprintln!("no godot; skipping");
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
             return;
         };
-        if Command::new(&godot).arg("--version").output().is_err() {
-            eprintln!("godot not runnable; skipping");
-            return;
-        }
         let project = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/strict_inject_project"
@@ -547,5 +709,54 @@ mod tests {
             !override_path.exists(),
             "override.cfg leaked into the project after check_script"
         );
+    }
+
+    /// Concurrency acceptance: many `check_script` calls against the *same* project at
+    /// once must each still surface the injected warnings — none may lose them to a
+    /// racing override.cfg drop. The fixture's project.godot disables the unsafe family,
+    /// so a check that ran without a live override would come back clean. Skipped when
+    /// no Godot is available.
+    #[test]
+    fn concurrent_check_script_does_not_lose_warnings() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        // Copy the hostile fixture into a private scratch project so this test owns its
+        // own override.cfg / registry key — otherwise it would share the shared project
+        // root (and refcount) with `live_injection_overrides_hostile_project` when the
+        // suite runs them in parallel, and each test's post-check "no leak" assertion
+        // would race the other's still-live guard.
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_inject_project"
+        ));
+        let project = scratch_dir("concurrent-check");
+        std::fs::copy(fixture.join("project.godot"), project.join("project.godot")).unwrap();
+        std::fs::copy(fixture.join("unsafe.gd"), project.join("unsafe.gd")).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let godot = godot.clone();
+                let project = project.clone();
+                std::thread::spawn(move || {
+                    check_script(&godot, &project, "unsafe.gd").unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            let diags = h.join().unwrap();
+            let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
+            assert!(
+                codes.contains(&"UNSAFE_METHOD_ACCESS"),
+                "a concurrent check lost its injected warnings: {diags:#?}"
+            );
+        }
+
+        assert!(
+            !project.join("override.cfg").exists(),
+            "override.cfg leaked after concurrent checks"
+        );
+        std::fs::remove_dir_all(&project).ok();
     }
 }
