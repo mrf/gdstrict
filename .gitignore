@@ -19,3 +19,7 @@ override.cfg
 .idea/
 .vscode/
 .orchestrator-*
+
+# Local agent/orchestrator state — never commit
+.claude/worktrees/
+.claude/scheduled_tasks.lock

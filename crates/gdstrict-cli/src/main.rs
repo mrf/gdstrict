@@ -1,4 +1,4 @@
-//! `gdstrict` — the strict-mode Godot formatter CLI.
+//! `gdstrict` — the strict-mode Godot formatter and linter CLI.
 //!
 //! Exit codes (CI / pre-commit friendly):
 //!   0  success — files written, or nothing would change under `--check`
@@ -11,6 +11,7 @@ mod check;
 mod config;
 mod diff;
 mod format;
+mod lint_cmd;
 mod walk;
 
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gdstrict", version, about = "The strict-mode Godot formatter")]
+#[command(name = "gdstrict", version, about = "The strict-mode Godot formatter and linter")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,6 +36,8 @@ enum Command {
     /// Exit 0 = clean, 1 = findings, 2 = config error (e.g. strict enabled but no
     /// Godot binary found). Strict is on by default; pass `--no-strict` to skip it.
     Check(CheckArgs),
+    /// Run syntactic lint rules over GDScript (`.gd`) files (no Godot needed).
+    Lint(LintArgs),
 }
 
 #[derive(Args)]
@@ -87,16 +90,28 @@ pub struct CheckArgs {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Args)]
+struct LintArgs {
+    /// Use this exact gdstrict.toml instead of discovering one per file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Files or directories to lint (directories are walked recursively).
+    /// Defaults to the current directory when omitted.
+    #[arg(default_value = ".", value_name = "PATH")]
+    paths: Vec<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Format(args) => run_format(&args),
         Command::Check(args) => check::run(&args),
+        Command::Lint(args) => run_lint(&args),
     }
 }
 
 fn run_format(args: &FormatArgs) -> ExitCode {
-    // Parse `--config` / validate `--line-length` once, up front.
     let mut resolver = match config::Resolver::new(args.config.as_deref(), args.line_length) {
         Ok(r) => r,
         Err(err) => {
@@ -113,7 +128,6 @@ fn run_format(args: &FormatArgs) -> ExitCode {
         had_error = true;
     }
 
-    // Write in place only in the default mode. `--check` and `--diff` never write.
     let write = !args.check && !args.diff;
     let mut changed = 0usize;
 
@@ -143,7 +157,6 @@ fn run_format(args: &FormatArgs) -> ExitCode {
         }
         changed += 1;
 
-        // Diffs go to stdout (pipeable); status lines go to stderr.
         if args.diff {
             print!("{}", diff::unified_diff(&src, &formatted, &display));
         }
@@ -167,4 +180,15 @@ fn run_format(args: &FormatArgs) -> ExitCode {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+fn run_lint(args: &LintArgs) -> ExitCode {
+    let mut resolver = match config::Resolver::new(args.config.as_deref(), None) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    lint_cmd::run(&args.paths, &mut resolver)
 }
