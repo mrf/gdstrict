@@ -80,11 +80,25 @@ impl<'src> LintContext<'src> {
         message: impl Into<String>,
     ) {
         let pos = node.start_position();
+        self.report_at(pos.row + 1, pos.column, rule, severity, message);
+    }
+
+    /// Record a finding at an explicit position. Used by rules that operate on
+    /// raw source rather than a single CST node (e.g. [`rules::MaxLineLength`],
+    /// which works line-by-line and has no node to anchor to).
+    pub fn report_at(
+        &mut self,
+        line: usize,
+        column: usize,
+        rule: &'static str,
+        severity: Severity,
+        message: impl Into<String>,
+    ) {
         self.diagnostics.push(Diagnostic {
             rule,
             severity,
-            line: pos.row + 1,
-            column: pos.column,
+            line,
+            column,
             message: message.into(),
         });
     }

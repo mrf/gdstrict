@@ -26,6 +26,11 @@ pub fn default_rules() -> Vec<Box<dyn Rule>> {
         Box::new(NoElifReturn),
         Box::new(ComparisonWithItself),
         Box::new(DuplicatedLoad::default()),
+        Box::new(ClassDefinitionsOrder),
+        Box::new(PrivateMethodCall),
+        Box::new(MaxLineLength::default()),
+        Box::new(FunctionArgumentsNumber::default()),
+        Box::new(MaxPublicMethods::default()),
     ]
 }
 
@@ -709,6 +714,332 @@ impl Rule for DuplicatedLoad {
     }
 }
 
+// ─── structure rules ──────────────────────────────────────────────────────────
+
+/// The class scopes that hold ordered member definitions: the file itself
+/// (`source`) and any inner class body (`class_body`). Both are walked the same
+/// way by [`ClassDefinitionsOrder`] and [`MaxPublicMethods`].
+fn is_class_scope(kind: &str) -> bool {
+    kind == "source" || kind == "class_body"
+}
+
+/// True if `node`'s `name` field exists and starts with `_`. The single source
+/// of truth for the "private member" convention shared by the structure rules
+/// (private variables, public-method counting).
+fn name_is_private(node: Node, ctx: &LintContext) -> bool {
+    node.child_by_field_name("name")
+        .is_some_and(|n| ctx.node_text(n).starts_with('_'))
+}
+
+/// True if a `variable_statement` carries the annotation named `want`
+/// (`export`, `onready`, …). Annotations live in an `annotations` child whose
+/// `annotation` grandchildren each start with an `identifier` naming the macro.
+fn variable_has_annotation(var: Node, ctx: &LintContext, want: &str) -> bool {
+    let mut cursor = var.walk();
+    let has = var.named_children(&mut cursor).any(|child| {
+        if child.kind() != "annotations" {
+            return false;
+        }
+        let mut inner = child.walk();
+        let found = child.named_children(&mut inner).any(|ann| {
+            ann.kind() == "annotation"
+                && ann
+                    .named_child(0)
+                    .is_some_and(|id| id.kind() == "identifier" && ctx.node_text(id) == want)
+        });
+        found
+    });
+    has
+}
+
+/// The canonical rank of a top-level class member, plus a human label. Lower
+/// ranks must appear before higher ranks. Returns `None` for members that don't
+/// participate in the ordering (inner classes, comments, parse errors) — those
+/// are skipped entirely so they never trigger or mask a finding.
+///
+/// The order mirrors the Godot style guide: tool/class annotations, `class_name`,
+/// `extends`, signals, enums, constants, then variables grouped
+/// exported → public → private → onready, then methods last.
+fn member_rank(node: Node, ctx: &LintContext) -> Option<(u8, &'static str)> {
+    match node.kind() {
+        // A bare top-level annotation is `@tool` / `@icon` and friends.
+        "annotation" => Some((0, "tool/class annotation")),
+        "class_name_statement" => Some((1, "class_name declaration")),
+        "extends_statement" => Some((2, "extends declaration")),
+        "signal_statement" => Some((3, "signal")),
+        "enum_definition" => Some((4, "enum")),
+        "const_statement" => Some((5, "constant")),
+        "variable_statement" => {
+            if variable_has_annotation(node, ctx, "export") {
+                Some((6, "exported variable"))
+            } else if variable_has_annotation(node, ctx, "onready") {
+                Some((9, "onready variable"))
+            } else if name_is_private(node, ctx) {
+                Some((8, "private variable"))
+            } else {
+                Some((7, "public variable"))
+            }
+        }
+        "constructor_definition" | "function_definition" => Some((10, "method")),
+        _ => None,
+    }
+}
+
+/// `class-definitions-order`: class members must appear in the canonical order
+/// (see [`member_rank`]). Walks each class scope once and flags any member that
+/// belongs to an earlier category than a member already seen.
+///
+/// CST: direct named children of `source` and `class_body`.
+pub struct ClassDefinitionsOrder;
+
+impl Rule for ClassDefinitionsOrder {
+    fn id(&self) -> &'static str {
+        "class-definitions-order"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        if !is_class_scope(node.kind()) {
+            return;
+        }
+        let mut cursor = node.walk();
+        // Collect first so the immutable `member_rank` borrows finish before we
+        // take the mutable `ctx` borrow needed by `report`.
+        let members: Vec<(Node, u8, &'static str)> = node
+            .named_children(&mut cursor)
+            .filter_map(|child| member_rank(child, ctx).map(|(r, l)| (child, r, l)))
+            .collect();
+
+        let mut max_rank: Option<u8> = None;
+        for (child, rank, label) in members {
+            match max_rank {
+                Some(m) if rank < m => {
+                    ctx.report(
+                        child,
+                        self.id(),
+                        Severity::Warning,
+                        format!("{label} is defined out of order"),
+                    );
+                }
+                _ => max_rank = Some(rank),
+            }
+        }
+    }
+}
+
+/// `private-method-call`: calling a private method (leading `_`) on another
+/// object. Private methods are an implementation detail; reaching into another
+/// object's `_method()` couples to internals. Calls on `self` and bare calls in
+/// the current scope are fine.
+///
+/// CST: `(attribute <receiver> (attribute_call (identifier "_name") ...))`.
+pub struct PrivateMethodCall;
+
+impl Rule for PrivateMethodCall {
+    fn id(&self) -> &'static str {
+        "private-method-call"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        if node.kind() != "attribute" {
+            return;
+        }
+        // First named child is the receiver; the call is an `attribute_call`.
+        let Some(receiver) = node.named_child(0) else {
+            return;
+        };
+        // A call directly on `self` is the object using its own private method.
+        if receiver.kind() == "identifier" && ctx.node_text(receiver) == "self" {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "attribute_call" {
+                continue;
+            }
+            let Some(method) = child.named_child(0) else {
+                continue;
+            };
+            if method.kind() != "identifier" {
+                continue;
+            }
+            let name = ctx.node_text(method);
+            if name.starts_with('_') {
+                ctx.report(
+                    method,
+                    self.id(),
+                    Severity::Warning,
+                    format!("call to private method `{name}` on another object"),
+                );
+            }
+        }
+    }
+}
+
+/// `max-line-length`: source lines longer than [`limit`](Self::limit) characters.
+/// Long lines hurt readability and side-by-side diffs. Length is counted in
+/// Unicode scalar values, not bytes, so multi-byte characters count as one.
+///
+/// Operates on raw source (anchored to the `source` root node so it runs once),
+/// not the CST, since the violation is about physical layout.
+pub struct MaxLineLength {
+    /// Maximum allowed line length in characters.
+    pub limit: usize,
+}
+
+impl Default for MaxLineLength {
+    fn default() -> Self {
+        Self { limit: 100 }
+    }
+}
+
+impl MaxLineLength {
+    /// Construct with an explicit character limit.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+}
+
+impl Rule for MaxLineLength {
+    fn id(&self) -> &'static str {
+        "max-line-length"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        // Anchor to the root so the per-line scan runs exactly once per file.
+        if node.kind() != "source" {
+            return;
+        }
+        let limit = self.limit;
+        let source = ctx.source();
+        // Materialize positions first to satisfy the borrow checker (immutable
+        // `source()` borrow must end before the mutable `report_at`).
+        let violations: Vec<(usize, usize)> = source
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let len = line.chars().count();
+                (len > limit).then_some((idx + 1, len))
+            })
+            .collect();
+        for (line, len) in violations {
+            ctx.report_at(
+                line,
+                limit,
+                self.id(),
+                Severity::Warning,
+                format!("line is {len} characters long (max {limit})"),
+            );
+        }
+    }
+}
+
+/// `function-arguments-number`: functions with more than [`limit`](Self::limit)
+/// parameters. A long parameter list is a smell — bundle related arguments into
+/// a struct/dictionary or split the function.
+///
+/// CST: `(function_definition parameters: (parameters ...))` and the analogous
+/// `constructor_definition`.
+pub struct FunctionArgumentsNumber {
+    /// Maximum allowed number of parameters.
+    pub limit: usize,
+}
+
+impl Default for FunctionArgumentsNumber {
+    fn default() -> Self {
+        Self { limit: 10 }
+    }
+}
+
+impl FunctionArgumentsNumber {
+    /// Construct with an explicit parameter-count limit.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+}
+
+impl Rule for FunctionArgumentsNumber {
+    fn id(&self) -> &'static str {
+        "function-arguments-number"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        if node.kind() != "function_definition" && node.kind() != "constructor_definition" {
+            return;
+        }
+        let Some(params) = node.child_by_field_name("parameters") else {
+            return;
+        };
+        let count = collect_param_idents(params, ctx).len();
+        if count > self.limit {
+            // Anchor on the function name when present, else the node itself.
+            let anchor = node.child_by_field_name("name").unwrap_or(node);
+            let limit = self.limit;
+            ctx.report(
+                anchor,
+                self.id(),
+                Severity::Warning,
+                format!("function has {count} arguments (max {limit})"),
+            );
+        }
+    }
+}
+
+/// `max-public-methods`: a class with more than [`limit`](Self::limit) public
+/// methods. A class doing too much is hard to reason about; this nudges toward
+/// splitting responsibilities. Private methods (leading `_`) and the `_init`
+/// constructor don't count toward the public surface.
+///
+/// CST: direct `function_definition` children of `source` / `class_body` whose
+/// name does not start with `_`.
+pub struct MaxPublicMethods {
+    /// Maximum allowed number of public methods per class.
+    pub limit: usize,
+}
+
+impl Default for MaxPublicMethods {
+    fn default() -> Self {
+        Self { limit: 20 }
+    }
+}
+
+impl MaxPublicMethods {
+    /// Construct with an explicit public-method limit.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+}
+
+impl Rule for MaxPublicMethods {
+    fn id(&self) -> &'static str {
+        "max-public-methods"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        if !is_class_scope(node.kind()) {
+            return;
+        }
+        let mut cursor = node.walk();
+        let count = node
+            .named_children(&mut cursor)
+            .filter(|child| {
+                child.kind() == "function_definition" && !name_is_private(*child, ctx)
+            })
+            .count();
+        if count > self.limit {
+            let limit = self.limit;
+            ctx.report(
+                node,
+                self.id(),
+                Severity::Warning,
+                format!("class has {count} public methods (max {limit})"),
+            );
+        }
+    }
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -996,13 +1327,13 @@ mod tests {
             "signal health_changed(old_hp: int, new_hp: int)\n",
             "signal died\n",
             "\n",
+            "enum State { IDLE, RUNNING, DEAD }\n",
+            "\n",
             "const MAX_HEALTH := 100\n",
             "const _REGEN_RATE := 1\n",
             "\n",
             "var current_health: int = MAX_HEALTH\n",
             "var _team_id: int = 0\n",
-            "\n",
-            "enum State { IDLE, RUNNING, DEAD }\n",
             "\n",
             "func _ready() -> void:\n",
             "\tvar initial := current_health\n",
@@ -1345,5 +1676,233 @@ mod tests {
             .filter(|d| d.rule == "duplicated-load")
             .collect();
         assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    // ── class-definitions-order ───────────────────────────────────────────────
+
+    #[test]
+    fn flags_const_before_signal() {
+        // signal (rank 3) appears after const (rank 5): the signal is out of order.
+        let src = "const MAX := 1\nsignal died\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("signal"));
+    }
+
+    #[test]
+    fn flags_enum_after_variables() {
+        let src = "var speed: int = 1\nenum State { IDLE }\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("enum"));
+    }
+
+    #[test]
+    fn accepts_canonical_member_order() {
+        let src = concat!(
+            "class_name Foo\n",
+            "extends Node\n",
+            "signal died\n",
+            "enum State { IDLE }\n",
+            "const MAX := 1\n",
+            "var pub_var: int = 0\n",
+            "var _priv_var: int = 0\n",
+            "func _ready() -> void:\n",
+            "\tpass\n",
+        );
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn flags_exported_var_after_plain_var() {
+        let src = "var plain: int = 0\n@export var exported: int = 0\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("exported"));
+    }
+
+    #[test]
+    fn checks_order_inside_inner_class() {
+        let src = "class Inner:\n\tvar x := 1\n\tsignal s\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("signal"));
+    }
+
+    // ── private-method-call ───────────────────────────────────────────────────
+
+    #[test]
+    fn flags_private_call_on_other_object() {
+        let src = "func f() -> void:\n\tobj._secret()\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "private-method-call")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("_secret"));
+    }
+
+    #[test]
+    fn accepts_private_call_on_self() {
+        let src = "func f() -> void:\n\tself._secret()\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "private-method-call")
+            .collect();
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn accepts_bare_private_call() {
+        let src = "func f() -> void:\n\t_secret()\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "private-method-call")
+            .collect();
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn accepts_public_call_on_other_object() {
+        let src = "func f() -> void:\n\tobj.public_method()\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "private-method-call")
+            .collect();
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    // ── max-line-length ───────────────────────────────────────────────────────
+
+    #[test]
+    fn flags_overlong_line() {
+        // 12-char limit; the comment line is longer.
+        let long = format!("# {}\n", "x".repeat(40));
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxLineLength::new(12))];
+        let diags = crate::lint_with(&long, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].rule, "max-line-length");
+        assert_eq!(diags[0].line, 1);
+        assert_eq!(diags[0].column, 12);
+        assert!(diags[0].message.contains("max 12"));
+    }
+
+    #[test]
+    fn accepts_lines_within_limit() {
+        let src = "var x := 1\nvar y := 2\n";
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxLineLength::new(100))];
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn line_length_counts_characters_not_bytes() {
+        // Five multi-byte characters: 5 chars but 15 bytes. Limit 10 → no finding.
+        let src = "# ★★★★★\n";
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxLineLength::new(10))];
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn max_line_length_default_is_100() {
+        assert_eq!(super::MaxLineLength::default().limit, 100);
+    }
+
+    // ── function-arguments-number ─────────────────────────────────────────────
+
+    #[test]
+    fn flags_too_many_arguments() {
+        let src = "func f(a, b, c, d) -> void:\n\tpass\n";
+        let rules: Vec<Box<dyn crate::Rule>> =
+            vec![Box::new(super::FunctionArgumentsNumber::new(3))];
+        let diags = crate::lint_with(src, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].rule, "function-arguments-number");
+        assert!(diags[0].message.contains("4 arguments"));
+    }
+
+    #[test]
+    fn accepts_arguments_within_limit() {
+        let src = "func f(a, b, c) -> void:\n\tprint(a, b, c)\n";
+        let rules: Vec<Box<dyn crate::Rule>> =
+            vec![Box::new(super::FunctionArgumentsNumber::new(3))];
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn counts_typed_and_default_arguments() {
+        let src = "func f(a: int, b: int = 0, c) -> void:\n\tpass\n";
+        let rules: Vec<Box<dyn crate::Rule>> =
+            vec![Box::new(super::FunctionArgumentsNumber::new(2))];
+        let diags = crate::lint_with(src, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("3 arguments"));
+    }
+
+    #[test]
+    fn function_arguments_default_is_10() {
+        assert_eq!(super::FunctionArgumentsNumber::default().limit, 10);
+    }
+
+    // ── max-public-methods ────────────────────────────────────────────────────
+
+    #[test]
+    fn flags_too_many_public_methods() {
+        let src = concat!(
+            "func a() -> void:\n\tpass\n",
+            "func b() -> void:\n\tpass\n",
+            "func c() -> void:\n\tpass\n",
+        );
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxPublicMethods::new(2))];
+        let diags = crate::lint_with(src, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].rule, "max-public-methods");
+        assert!(diags[0].message.contains("3 public methods"));
+    }
+
+    #[test]
+    fn private_methods_do_not_count() {
+        let src = concat!(
+            "func a() -> void:\n\tpass\n",
+            "func _b() -> void:\n\tpass\n",
+            "func _c() -> void:\n\tpass\n",
+        );
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxPublicMethods::new(2))];
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn accepts_methods_within_limit() {
+        let src = concat!(
+            "func a() -> void:\n\tpass\n",
+            "func b() -> void:\n\tpass\n",
+        );
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxPublicMethods::new(2))];
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn max_public_methods_default_is_20() {
+        assert_eq!(super::MaxPublicMethods::default().limit, 20);
     }
 }
