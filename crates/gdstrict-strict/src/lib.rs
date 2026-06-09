@@ -343,6 +343,157 @@ pub fn check_scripts(
     .collect()
 }
 
+/// Check **every** script in a project with a single engine boot per pass via a
+/// throwaway GDScript harness that `load()`s each file in one process, instead of
+/// spawning Godot once per file. This is the batch strategy benchmarked in
+/// `docs/phase3/bench-strict-invocation.md` and chosen as the default for CI-scale
+/// projects: Godot's ~0.4s engine startup dominates per-file invocation, so amortizing
+/// it across the whole corpus is an order of magnitude faster than per-file.
+///
+/// `script_rels` are project-relative paths (e.g. `"core/foo.gd"`), exactly as
+/// [`check_script`] takes them. Returns the combined diagnostics for the whole batch,
+/// each carrying the `res://` file it was reported against (use [`Diagnostic::file`] to
+/// demultiplex back to a source file).
+///
+/// ## Two passes, same crash-avoidance as [`check_script`]
+///
+/// 1. **Errors** — boot once, no `--debug`, `load()` every file. Surfaces
+///    `SCRIPT ERROR:` parse errors safely; `--debug` is never on, so a hard error can
+///    never trip the debugger into the signal-11 crash (spike .2 finding).
+/// 2. **Warnings** — boot once with `--debug`, `load()` only the files that produced
+///    **no** error in pass 1. Because every file in this pass parsed cleanly, the
+///    debugger has nothing to break on — the same invariant per-file mode relies on,
+///    just batched.
+///
+/// ## Tradeoff vs [`check_scripts`] (per-file pool)
+///
+/// Batch trades per-file process isolation for speed: a pathological file that hard-
+/// crashes the engine (segfault, not a parse error) takes the whole pass down with it,
+/// whereas the per-file pool loses only that one job. Pass 1 is crash-proof; the
+/// residual risk lives in pass 2 and is the same class of risk per-file `--debug` runs
+/// carry. Callers that need bulletproof isolation on an untrusted corpus can fall back
+/// to [`check_scripts`]; for trusted CI corpora batch is the right default.
+pub fn check_project_batch(
+    godot: &Path,
+    project_dir: &Path,
+    script_rels: &[String],
+) -> std::io::Result<Vec<Diagnostic>> {
+    if script_rels.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Force the strict warning set on for both passes; restored on drop (incl. `?`).
+    let _warnings = StrictWarnings::install(project_dir)?;
+
+    // Pass 1: errors over the whole corpus, no --debug (safe).
+    let err_stderr = run_harness(godot, project_dir, script_rels, false)?;
+    let mut diags = parse_diagnostics(&err_stderr);
+
+    // Files that produced a hard error must be excluded from the --debug pass, or the
+    // debugger break would crash it. Errors carry the `res://` file they hit.
+    let errored: std::collections::HashSet<&str> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.file.as_str())
+        .collect();
+    let clean: Vec<String> = script_rels
+        .iter()
+        .filter(|rel| !errored.contains(format!("res://{rel}").as_str()))
+        .cloned()
+        .collect();
+
+    // Pass 2: warnings over the error-free files, --debug (safe — nothing to break on).
+    if !clean.is_empty() {
+        let warn_stderr = run_harness(godot, project_dir, &clean, true)?;
+        diags.extend(parse_diagnostics(&warn_stderr));
+    }
+    Ok(diags)
+}
+
+/// Run a generated batch harness over `script_rels` in one engine boot and return its
+/// stderr. The harness `load()`s each `res://<rel>` so the analyzer compiles (and, under
+/// `debug`, warns on) every file in a single process. The harness is written to a unique
+/// temp path and removed before returning — it lives outside the project tree, so it
+/// never pollutes the source corpus (Godot accepts an absolute `--script` alongside
+/// `--path <project>`).
+fn run_harness(
+    godot: &Path,
+    project_dir: &Path,
+    script_rels: &[String],
+    debug: bool,
+) -> std::io::Result<String> {
+    let harness_path = unique_harness_path();
+    std::fs::write(&harness_path, batch_harness_source(script_rels))?;
+    // Remove the harness no matter how `run` returns.
+    let _cleanup = HarnessFile(&harness_path);
+
+    let mut cmd = Command::new(godot);
+    cmd.arg("--headless")
+        .arg("--path")
+        .arg(project_dir)
+        .arg("--script")
+        .arg(&harness_path);
+    if debug {
+        cmd.arg("--debug");
+    }
+    capture_stderr(&mut cmd)
+}
+
+/// Run a built command and return its stderr as a lossy `String`. Godot writes all
+/// analyzer diagnostics to stderr, so every invocation path funnels through here.
+fn capture_stderr(cmd: &mut Command) -> std::io::Result<String> {
+    let out = cmd.output()?;
+    Ok(String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// RAII cleanup for the throwaway harness file: best-effort remove on drop.
+struct HarnessFile<'a>(&'a Path);
+
+impl Drop for HarnessFile<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
+/// A process-unique path for a throwaway harness `.gd` in the OS temp dir. Uniqueness is
+/// `pid` + a monotonic counter so concurrent/back-to-back batches never collide (no
+/// `Math.random`/clock needed — those are unavailable in some sandboxes anyway).
+fn unique_harness_path() -> PathBuf {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("gdstrict-batch-{pid}-{n}.gd"))
+}
+
+/// Generate the fully-typed `SceneTree` harness that `load()`s each script. It is typed
+/// to the hilt on purpose: an untyped harness would itself trip `UNTYPED_DECLARATION`
+/// and pollute the diagnostics with warnings about the harness instead of the corpus.
+fn batch_harness_source(script_rels: &[String]) -> String {
+    let mut s = String::from(
+        "# Generated by gdstrict (check_project_batch). Loads every project script in\n\
+         # one engine boot so the analyzer compiles/warns on all of them at once.\n\
+         extends SceneTree\n\n\
+         func _init() -> void:\n\
+         \tvar files: PackedStringArray = PackedStringArray([\n",
+    );
+    for rel in script_rels {
+        // Godot string literals: escape backslash and quote so odd paths stay valid.
+        let escaped = rel.replace('\\', "\\\\").replace('"', "\\\"");
+        s.push_str("\t\t\"res://");
+        s.push_str(&escaped);
+        s.push_str("\",\n");
+    }
+    s.push_str(
+        "\t])\n\
+         \tfor f: String in files:\n\
+         \t\tvar res: Resource = load(f)\n\
+         \t\tif res == null:\n\
+         \t\t\tpush_error(\"gdstrict: failed to load \" + f)\n\
+         \tquit()\n",
+    );
+    s
+}
+
 /// Apply `work(i)` for every `i in 0..n` across a bounded pool of `workers` threads,
 /// returning the results in index order: `result[i]` is the outcome of `work(i)`.
 ///
@@ -405,9 +556,7 @@ fn run(godot: &Path, project_dir: &Path, script_rel: &str, debug: bool) -> std::
     if debug {
         cmd.arg("--debug");
     }
-    let out = cmd.output()?;
-    // Diagnostics go to stderr.
-    Ok(String::from_utf8_lossy(&out.stderr).into_owned())
+    capture_stderr(&mut cmd)
 }
 
 /// Parse Godot stderr into diagnostics. Pairs each `WARNING:` / `*ERROR:` header
@@ -739,6 +888,83 @@ mod tests {
                  STRICT_WARNINGS and the fixture have drifted"
             );
         }
+    }
+
+    // --- batch harness generation (no Godot) ---
+
+    /// The generated harness must be fully typed (no untyped/inferred decls that would
+    /// emit their own warnings) and must list every script as a `res://` literal.
+    #[test]
+    fn batch_harness_is_typed_and_lists_every_script() {
+        let rels = vec!["core/foo.gd".to_string(), "ui/bar.gd".to_string()];
+        let src = batch_harness_source(&rels);
+        // Typed throughout — these exact typed decls are what keep the harness from
+        // tripping UNTYPED_DECLARATION/INFERRED_DECLARATION on itself.
+        assert!(src.contains("var files: PackedStringArray"));
+        assert!(src.contains("for f: String in files"));
+        assert!(src.contains("var res: Resource = load(f)"));
+        // Every script is referenced as a res:// literal.
+        assert!(src.contains("\"res://core/foo.gd\""));
+        assert!(src.contains("\"res://ui/bar.gd\""));
+    }
+
+    /// Paths with quotes/backslashes must be escaped so the harness stays valid GDScript.
+    #[test]
+    fn batch_harness_escapes_paths() {
+        let rels = vec!["weird\\\"name.gd".to_string()];
+        let src = batch_harness_source(&rels);
+        assert!(
+            src.contains("\"res://weird\\\\\\\"name.gd\""),
+            "backslash and quote must be escaped, got:\n{src}"
+        );
+    }
+
+    /// Distinct calls hand out distinct harness paths so concurrent batches never
+    /// clobber each other's harness file.
+    #[test]
+    fn unique_harness_paths_differ() {
+        let a = unique_harness_path();
+        let b = unique_harness_path();
+        assert_ne!(a, b, "harness paths must be unique across calls");
+        assert!(a.to_string_lossy().ends_with(".gd"));
+    }
+
+    /// Live batch check over the warning fixture: one engine boot must surface the same
+    /// warning family per-file mode does. Skipped when no Godot is available.
+    #[test]
+    fn live_batch_surfaces_warnings() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        let project = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_project"
+        ));
+        let diags = check_project_batch(&godot, project, &["unsafe.gd".to_string()]).unwrap();
+        let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
+        assert!(
+            codes.contains(&"UNSAFE_METHOD_ACCESS"),
+            "batch lost warnings: {diags:#?}"
+        );
+        assert!(codes.contains(&"UNTYPED_DECLARATION"));
+        assert!(codes.contains(&"INTEGER_DIVISION"));
+        // Note: no override.cfg-leak assertion here — this shares the `strict_project`
+        // fixture with `live_strict_extraction`, whose still-live refcounted guard can
+        // legitimately keep override.cfg present while this test runs. The no-leak
+        // property is covered on private dirs by `guard_creates_and_removes_override`
+        // and `concurrent_check_script_does_not_lose_warnings`.
+    }
+
+    /// An empty corpus is a no-op: no harness, no Godot boot, empty result.
+    #[test]
+    fn batch_empty_corpus_is_noop() {
+        // No Godot needed — empties short-circuit before any boot. Use a path that need
+        // not exist; install() is never reached.
+        let godot = PathBuf::from("/nonexistent/godot");
+        let project = PathBuf::from("/nonexistent/project");
+        let out = check_project_batch(&godot, &project, &[]).unwrap();
+        assert!(out.is_empty());
     }
 
     // --- find_godot_in_dirs unit tests (no env-var mutation, thread-safe) ---
