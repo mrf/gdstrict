@@ -394,7 +394,9 @@ pub fn check_project_batch(
 
     // Pass 1: errors over the whole corpus, no --debug (safe).
     let err_stderr = run_harness(godot, project_dir, script_rels, false)?;
-    let mut diags = parse_diagnostics(&err_stderr);
+    // Merge-resolution: 6zk.5 added a version param to parse_diagnostics; batch mode
+    // does no version detection, so pass None (fallback classifier). See follow-up issue.
+    let mut diags = parse_diagnostics(&err_stderr, None);
 
     // Files that produced a hard error must be excluded from the --debug pass, or the
     // debugger break would crash it. Errors carry the `res://` file they hit.
@@ -412,7 +414,7 @@ pub fn check_project_batch(
     // Pass 2: warnings over the error-free files, --debug (safe — nothing to break on).
     if !clean.is_empty() {
         let warn_stderr = run_harness(godot, project_dir, &clean, true)?;
-        diags.extend(parse_diagnostics(&warn_stderr));
+        diags.extend(parse_diagnostics(&warn_stderr, None));
     }
     Ok(diags)
 }
