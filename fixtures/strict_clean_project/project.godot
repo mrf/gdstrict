@@ -1,0 +1,12 @@
+; Minimal Godot project for the strict-mode acceptance gate — the *clean* half.
+; Every declaration in clean.gd is fully typed and every access is statically
+; safe, so the analyzer emits no warnings from gdstrict's injected strict set:
+; `gdstrict check` must exit 0 on this project. (gdstrict forces its required
+; `gdscript/warnings/*` on via override.cfg, so this file needs no [debug] block.)
+
+config_version=5
+
+[application]
+
+config/name="gdstrict-strict-clean"
+config/features=PackedStringArray("4.6")

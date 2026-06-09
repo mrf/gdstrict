@@ -41,6 +41,18 @@ fn code(output: &std::process::Output) -> i32 {
     output.status.code().expect("process exited via signal")
 }
 
+/// A `gdstrict` command whose environment has **no** discoverable Godot: `$GODOT`
+/// is removed and `$PATH` is emptied, so `find_godot()` returns `None` regardless
+/// of the host machine. The binary itself is launched by absolute path (Cargo's
+/// `CARGO_BIN_EXE_*`), so the empty `PATH` does not affect spawning it — only the
+/// child's own Godot discovery. Used by the no-Godot fallback tests; the env pair
+/// is the load-bearing contract, so it lives in one place.
+fn no_godot_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GODOT").env("PATH", "");
+    cmd
+}
+
 /// A one-line array literal long enough to wrap below ~30 columns but fit at 100.
 const LONG_ARRAY: &str = "var items = [aaaaaa, bbbbbb, cccccc, dddddd, eeeeee, ffffff]\n";
 
@@ -358,11 +370,13 @@ fn check_missing_path_is_config_error() {
     assert_eq!(code(&out), 2);
 }
 
-/// End-to-end strict pass against a real Godot binary. The fixture's `unsafe.gd`
-/// is untyped/unsafe, so the strict preset promotes it to errors → exit 1.
-/// Skipped when no Godot is discoverable (CI without Godot, dev box without it).
+/// Phase 2 acceptance (PLAN.md §3): the untyped/unsafe fixture project → `check`
+/// exits non-zero **with the exact expected warning codes**. The strict preset
+/// promotes the untyped/unsafe family to errors (exit 1); `INTEGER_DIVISION` stays
+/// a non-failing warning (the preset leaves it `Warn`). Skipped when no Godot is
+/// discoverable — the no-Godot path is asserted separately below.
 #[test]
-fn check_strict_flags_unsafe_fixture_when_godot_present() {
+fn check_strict_flags_unsafe_fixture_with_exact_codes() {
     if gdstrict_strict::find_godot().is_none() {
         eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
         return;
@@ -381,9 +395,99 @@ fn check_strict_flags_unsafe_fixture_when_godot_present() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Exact promoted-to-error codes the fixture must surface. Each appears as a
+    // `[strict:error] <CODE>` line; assert on the code so the test pins the
+    // analyzer contract, not just "something failed".
+    for code in [
+        "UNTYPED_DECLARATION",
+        "UNSAFE_METHOD_ACCESS",
+        "UNSAFE_CAST",
+        "RETURN_VALUE_DISCARDED",
+    ] {
+        assert!(
+            stderr.contains(&format!("[strict:error] {code}")),
+            "expected strict error {code}; stderr: {stderr}"
+        );
+    }
+    // INTEGER_DIVISION is in the fixture but the strict preset keeps it a warning,
+    // so it is reported but does not (by itself) fail the gate.
     assert!(
-        stderr.contains("[strict:error]"),
-        "expected a strict error line; stderr: {stderr}"
+        stderr.contains("[strict:warning] INTEGER_DIVISION"),
+        "expected INTEGER_DIVISION as a non-failing warning; stderr: {stderr}"
+    );
+}
+
+/// Phase 2 acceptance (PLAN.md §3): the clean, fully-typed fixture project →
+/// `check` exits 0. Every declaration is typed and every access statically safe,
+/// so gdstrict's injected strict warning set produces nothing. This is the
+/// exit-0 half that proves the gate does not fire on conforming code.
+/// Skipped when no Godot is discoverable.
+#[test]
+fn check_strict_passes_clean_typed_fixture() {
+    if gdstrict_strict::find_godot().is_none() {
+        eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/strict_clean_project/clean.gd");
+    let out = Command::new(bin())
+        .args(["check"])
+        .arg(&fixture)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        0,
+        "clean typed fixture must pass strict; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("check: clean"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Phase 2 acceptance (PLAN.md §3) — the no-Godot fallback path: when strict is
+/// enabled (the default) but **no** Godot binary is discoverable, `check` exits 2
+/// (a configuration error), never a silent pass. This is the discovery-returns-None
+/// branch, distinct from `check_missing_godot_is_config_error` (explicit `--godot`
+/// to a missing path). We force discovery to fail by clearing `$GODOT` and `$PATH`
+/// for the child, so `find_godot()` finds nothing regardless of the host machine.
+#[test]
+fn check_no_godot_discovered_is_config_error() {
+    let file = temp_file("check_nogodot.gd", "extends Node\n");
+    let out = no_godot_cmd()
+        .args(["check"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        2,
+        "strict enabled + no Godot found must be a config error (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The companion to the fallback test: with `--no-strict` the same no-Godot
+/// environment is fine — strict is dropped along with its Godot requirement, so a
+/// clean file exits 0. Proves the exit-2 above is strictly about the strict pass.
+#[test]
+fn check_no_strict_passes_without_godot() {
+    let formatted = "extends Node\n\nfunc _ready() -> void:\n\tpass\n";
+    let file = temp_file("check_nogodot_nostrict.gd", formatted);
+    let out = no_godot_cmd()
+        .args(["check", "--no-strict"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict");
+    assert_eq!(
+        code(&out),
+        0,
+        "--no-strict must not require Godot; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

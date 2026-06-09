@@ -1050,6 +1050,33 @@ mod tests {
         assert!(codes.contains(&"INTEGER_DIVISION"));
     }
 
+    /// Acceptance (clean half): the fully-typed fixture project must yield **no**
+    /// strict-family warning codes, so `check` can exit 0 on it. Mirrors
+    /// `live_strict_extraction` (the unsafe half) at the analyzer layer and pins the
+    /// clean fixture against regressions. Skipped when no Godot is available.
+    #[test]
+    fn live_clean_project_has_no_strict_warnings() {
+        let Some(godot) = find_godot() else {
+            eprintln!("no godot on PATH; skipping");
+            return;
+        };
+        let project = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_clean_project"
+        );
+        let diags = check_script(&godot, Path::new(project), "clean.gd").unwrap();
+        // No hard parse errors, and none of the strict-family codes the preset
+        // promotes (the only thing that could fail the gate).
+        let offending: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error || d.code.is_some())
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "clean fixture must emit no strict diagnostics, got {offending:#?}"
+        );
+    }
+
     /// Injection acceptance test: the fixture project's project.godot *actively
     /// disables* the unsafe/untyped family, yet gdstrict must still surface those
     /// warnings because it injects its own override.cfg. Proves we do not trust the
