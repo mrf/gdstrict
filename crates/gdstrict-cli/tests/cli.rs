@@ -372,9 +372,15 @@ fn check_missing_path_is_config_error() {
 
 /// Phase 2 acceptance (PLAN.md §3): the untyped/unsafe fixture project → `check`
 /// exits non-zero **with the exact expected warning codes**. The strict preset
-/// promotes the untyped/unsafe family to errors (exit 1); `INTEGER_DIVISION` stays
-/// a non-failing warning (the preset leaves it `Warn`). Skipped when no Godot is
-/// discoverable — the no-Godot path is asserted separately below.
+/// promotes the untyped/unsafe family to errors (exit 1).
+///
+/// This also pins the canonical config contract: `check` discovers and honors the
+/// project's own `gdstrict.toml`. That fixture sets `INTEGER_DIVISION = "off"`, so
+/// the per-project override wins over the preset and the code is **suppressed
+/// entirely** — it must not surface as either a warning or an error. (Before
+/// per-project severity was wired in, `check` used the hardcoded built-in preset
+/// and INTEGER_DIVISION leaked through as a warning; that is the bug this fixes.)
+/// Skipped when no Godot is discoverable — the no-Godot path is asserted below.
 #[test]
 fn check_strict_flags_unsafe_fixture_with_exact_codes() {
     if gdstrict_strict::find_godot().is_none() {
@@ -410,11 +416,12 @@ fn check_strict_flags_unsafe_fixture_with_exact_codes() {
             "expected strict error {code}; stderr: {stderr}"
         );
     }
-    // INTEGER_DIVISION is in the fixture but the strict preset keeps it a warning,
-    // so it is reported but does not (by itself) fail the gate.
+    // INTEGER_DIVISION appears in the fixture source, but the project's
+    // gdstrict.toml sets it `off`. Honoring that per-project override suppresses it
+    // completely: it must not appear as a warning OR an error.
     assert!(
-        stderr.contains("[strict:warning] INTEGER_DIVISION"),
-        "expected INTEGER_DIVISION as a non-failing warning; stderr: {stderr}"
+        !stderr.contains("INTEGER_DIVISION"),
+        "fixture gdstrict.toml sets INTEGER_DIVISION=off; the override must suppress it; stderr: {stderr}"
     );
 }
 

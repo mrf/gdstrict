@@ -1,9 +1,21 @@
 //! Config discovery + resolution (black/ruff style).
 //!
-//! A `gdstrict.toml` carries two independent knobs:
+//! A single `gdstrict.toml` is the one place a project configures every gdstrict
+//! subsystem. It carries four independent knobs across two concerns:
 //!
-//! - `line-length` (default 100) — controls formatter wrapping width.
-//! - `[lint]` table — per-rule enable/disable for the `lint` command.
+//! - **format/lint** — `line-length` (default 100) controls formatter wrapping
+//!   width; the `[lint]` table is per-rule enable/disable for the `lint` command.
+//! - **strict severity** — `preset` selects a severity bundle (`strict`, the
+//!   default) and the `[warnings]` table sets per-code overrides (`error` | `warn`
+//!   | `off`) consumed by `check`'s strict pass.
+//!
+//! This module is the **single parse authority** for that file: it parses the
+//! whole thing with the `toml` crate and hands the strict half to the
+//! `gdstrict-strict` crate as a structured [`gdstrict_strict::SeverityConfig`]
+//! (via [`gdstrict_strict::SeverityConfig::from_parts`]). The strict crate keeps
+//! its own zero-dependency hand parser for pure-severity inputs, but never sees a
+//! unified file — so the format and severity keys can coexist without either
+//! parser rejecting the other's keys.
 //!
 //! Precedence, highest first:
 //!   1. `--line-length <n>` — overrides line length for every file.
@@ -12,22 +24,29 @@
 //!   3. The nearest `gdstrict.toml` found by walking UP the directory tree from
 //!      each input file (black/ruff style); defaults apply when none is found.
 //!
-//! Example `gdstrict.toml`:
+//! Example unified `gdstrict.toml`:
 //!
 //! ```toml
 //! line-length = 100
+//! preset = "strict"
 //!
 //! [lint]
 //! function-name-case = false
 //! constant-name-case = false
+//!
+//! [warnings]
+//! INTEGER_DIVISION = "off"
 //! ```
 //!
 //! In the `[lint]` table, `false` disables a rule; `true` (or omitting the key)
-//! keeps it enabled.
+//! keeps it enabled. In `[warnings]`, each value is an action token. When no
+//! `preset` key is given, severity defaults to the built-in `strict` preset — the
+//! strictest-by-default position `check` already took.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use gdstrict_strict::{Action, Preset, SeverityConfig};
 use serde::Deserialize;
 
 /// Default line width (Godot style guide / black default). Aliased to the
@@ -36,14 +55,22 @@ pub const DEFAULT_LINE_LENGTH: usize = gdstrict_format::DEFAULT_WIDTH;
 
 const CONFIG_FILENAME: &str = "gdstrict.toml";
 
-/// On-disk shape of a `gdstrict.toml`.
+/// On-disk shape of a `gdstrict.toml`. Unknown top-level keys are rejected
+/// (`deny_unknown_fields`) so a typo like `line_length` fails loudly rather than
+/// silently doing nothing — strictest-by-default.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(rename = "line-length")]
     line_length: Option<usize>,
     /// Per-rule enable/disable. `false` disables a rule; `true` or absent means enabled.
     #[serde(default)]
     lint: HashMap<String, bool>,
+    /// Strict severity preset name (only `strict` is known). Absent ⇒ `strict`.
+    preset: Option<String>,
+    /// Per-code strict severity overrides; each value is `error` | `warn` | `off`.
+    #[serde(default)]
+    warnings: HashMap<String, String>,
 }
 
 /// Effective per-file lint settings resolved from config.
@@ -58,15 +85,37 @@ impl LintConfig {
     }
 }
 
-/// Resolves the effective line length and lint config for each file, applying
-/// the precedence described in the module docs. Discovery results are memoized
-/// per directory so processing a large tree does not re-walk for every file.
+/// Everything one `gdstrict.toml` resolves to, kept together so the three knobs
+/// are discovered and cached as a single unit (no risk of one cache drifting out
+/// of step with another).
+#[derive(Clone)]
+struct Resolved {
+    line_length: usize,
+    lint: LintConfig,
+    severity: SeverityConfig,
+}
+
+impl Resolved {
+    /// The values that apply when no `gdstrict.toml` is discovered. Severity
+    /// defaults to the built-in `strict` preset (not `SeverityConfig::default`,
+    /// which is all-`warn`) — `check` is strict-by-default.
+    fn defaults() -> Self {
+        Self {
+            line_length: DEFAULT_LINE_LENGTH,
+            lint: LintConfig::default(),
+            severity: SeverityConfig::strict(),
+        }
+    }
+}
+
+/// Resolves the effective line length, lint config, and strict severity profile
+/// for each file, applying the precedence described in the module docs. Discovery
+/// results are memoized per directory so processing a large tree does not re-walk
+/// for every file.
 pub struct Resolver {
     cli_line_length: Option<usize>,
-    forced_line_length: Option<usize>,
-    forced_lint: Option<LintConfig>,
-    cache: HashMap<PathBuf, usize>,
-    lint_cache: HashMap<PathBuf, LintConfig>,
+    forced: Option<Resolved>,
+    cache: HashMap<PathBuf, Resolved>,
 }
 
 impl Resolver {
@@ -76,71 +125,71 @@ impl Resolver {
         if let Some(n) = cli_line_length {
             validate(n, "--line-length")?;
         }
-        let (forced_line_length, forced_lint) = match config {
-            Some(path) => {
-                let (ll, lc) = load(path)?;
-                (Some(ll), Some(lc))
-            }
-            None => (None, None),
+        let forced = match config {
+            Some(path) => Some(load(path)?),
+            None => None,
         };
         Ok(Self {
             cli_line_length,
-            forced_line_length,
-            forced_lint,
+            forced,
             cache: HashMap::new(),
-            lint_cache: HashMap::new(),
         })
     }
 
-    /// The effective line length to format `file` at.
+    /// The effective line length to format `file` at. The one accessor with an
+    /// extra precedence tier: `--line-length` beats `--config` and discovery.
     pub fn line_length_for(&mut self, file: &Path) -> Result<usize, String> {
         if let Some(n) = self.cli_line_length {
             return Ok(n);
         }
-        if let Some(n) = self.forced_line_length {
-            return Ok(n);
-        }
-        let start = file.parent().unwrap_or_else(|| Path::new("."));
-        Ok(self.discover(start)?.0)
+        Ok(self.resolved_for(file)?.line_length)
     }
 
     /// The effective lint config for `file`.
     pub fn lint_config_for(&mut self, file: &Path) -> Result<LintConfig, String> {
-        if let Some(ref lc) = self.forced_lint {
-            return Ok(lc.clone());
-        }
-        let start = file.parent().unwrap_or_else(|| Path::new("."));
-        Ok(self.discover(start)?.1)
+        Ok(self.resolved_for(file)?.lint)
     }
 
-    /// Walk up from `start` to the nearest `gdstrict.toml`; return defaults if none.
-    fn discover(&mut self, start: &Path) -> Result<(usize, LintConfig), String> {
-        // Both caches are populated together — if one entry exists, both do.
-        if let Some(&ll) = self.cache.get(start) {
-            let lc = self.lint_cache.get(start).cloned().unwrap_or_default();
-            return Ok((ll, lc));
+    /// The effective strict severity profile for `file`. Unlike line length, the
+    /// CLI has no per-run severity override flag, so precedence is just `--config`
+    /// then discovery.
+    pub fn severity_config_for(&mut self, file: &Path) -> Result<SeverityConfig, String> {
+        Ok(self.resolved_for(file)?.severity)
+    }
+
+    /// The full resolved bundle for `file`: a `--config` file (if given) wins over
+    /// per-file discovery. The shared `forced`-then-`discover` precedence lives
+    /// here so the public accessors don't each re-implement it.
+    fn resolved_for(&mut self, file: &Path) -> Result<Resolved, String> {
+        if let Some(ref f) = self.forced {
+            return Ok(f.clone());
         }
-        let mut found_ll = DEFAULT_LINE_LENGTH;
-        let mut found_lc = LintConfig::default();
+        self.discover_for(file)
+    }
+
+    /// Resolve and cache the [`Resolved`] bundle for `file`'s directory.
+    fn discover_for(&mut self, file: &Path) -> Result<Resolved, String> {
+        let start = file.parent().unwrap_or_else(|| Path::new("."));
+        if let Some(hit) = self.cache.get(start) {
+            return Ok(hit.clone());
+        }
+        let mut found = Resolved::defaults();
         let mut dir = Some(start);
         while let Some(d) = dir {
             let candidate = d.join(CONFIG_FILENAME);
             if candidate.is_file() {
-                let (ll, lc) = load(&candidate)?;
-                found_ll = ll;
-                found_lc = lc;
+                found = load(&candidate)?;
                 break;
             }
             dir = d.parent();
         }
-        self.cache.insert(start.to_path_buf(), found_ll);
-        self.lint_cache.insert(start.to_path_buf(), found_lc.clone());
-        Ok((found_ll, found_lc))
+        self.cache.insert(start.to_path_buf(), found.clone());
+        Ok(found)
     }
 }
 
-/// Read and parse a `gdstrict.toml`, returning its resolved values.
-fn load(path: &Path) -> Result<(usize, LintConfig), String> {
+/// Read and parse a unified `gdstrict.toml`, returning its resolved values.
+fn load(path: &Path) -> Result<Resolved, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("reading config {}: {e}", path.display()))?;
     let raw: RawConfig =
@@ -157,7 +206,42 @@ fn load(path: &Path) -> Result<(usize, LintConfig), String> {
         .into_iter()
         .filter_map(|(k, enabled)| if !enabled { Some(k) } else { None })
         .collect();
-    Ok((line_length, LintConfig { disabled }))
+    let severity = severity_from(raw.preset, raw.warnings, path)?;
+    Ok(Resolved {
+        line_length,
+        lint: LintConfig { disabled },
+        severity,
+    })
+}
+
+/// Build the strict severity profile from the unified config's `preset` /
+/// `[warnings]`. An absent `preset` defaults to `strict` (strictest-by-default);
+/// unknown preset names or action tokens are hard errors, not silent skips.
+fn severity_from(
+    preset: Option<String>,
+    warnings: HashMap<String, String>,
+    path: &Path,
+) -> Result<SeverityConfig, String> {
+    let preset = match preset {
+        Some(name) => Some(Preset::parse(&name).ok_or_else(|| {
+            format!(
+                "unknown preset `{name}` in {} (known: strict)",
+                path.display()
+            )
+        })?),
+        None => Some(Preset::Strict),
+    };
+    let mut overrides = HashMap::new();
+    for (code, token) in warnings {
+        let action = Action::parse(&token).ok_or_else(|| {
+            format!(
+                "unknown action `{token}` for `{code}` in {} (expected error|warn|off)",
+                path.display()
+            )
+        })?;
+        overrides.insert(code, action);
+    }
+    Ok(SeverityConfig::from_parts(preset, overrides))
 }
 
 /// A line length of 0 would force maximal wrapping on every construct; reject it
@@ -324,5 +408,101 @@ mod tests {
         let lc2 = r.lint_config_for(&dir.join("b.gd")).unwrap();
         assert!(!lc1.is_enabled("signal-name-case"));
         assert!(!lc2.is_enabled("signal-name-case"));
+    }
+
+    // ── severity config ───────────────────────────────────────────────────────
+
+    #[test]
+    fn severity_defaults_to_strict_preset() {
+        let dir = scratch("sev-default");
+        let mut r = Resolver::new(None, None).unwrap();
+        let sc = r.severity_config_for(&dir.join("a.gd")).unwrap();
+        // No config discovered ⇒ built-in strict preset, not all-warn default.
+        assert_eq!(sc.action_for("UNSAFE_CAST"), Action::Error);
+        assert_eq!(sc.action_for("INTEGER_DIVISION"), Action::Warn);
+    }
+
+    #[test]
+    fn severity_absent_preset_key_still_strict() {
+        // A config that configures only formatting still leaves severity strict —
+        // `check` is strict-by-default whether or not a config file exists.
+        let dir = scratch("sev-format-only");
+        fs::write(dir.join("gdstrict.toml"), "line-length = 80\n").unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let sc = r.severity_config_for(&dir.join("a.gd")).unwrap();
+        assert_eq!(sc.action_for("UNTYPED_DECLARATION"), Action::Error);
+    }
+
+    #[test]
+    fn severity_warnings_override_beats_preset() {
+        let dir = scratch("sev-override");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "preset = \"strict\"\n\n[warnings]\nINTEGER_DIVISION = \"off\"\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let sc = r.severity_config_for(&dir.join("a.gd")).unwrap();
+        assert_eq!(sc.action_for("INTEGER_DIVISION"), Action::Off); // override wins
+        assert_eq!(sc.action_for("UNSAFE_CAST"), Action::Error); // still from preset
+    }
+
+    #[test]
+    fn unified_file_satisfies_format_and_severity_together() {
+        // One gdstrict.toml carrying all four knobs parses cleanly and resolves
+        // each concern — the whole point of the unified schema.
+        let dir = scratch("sev-unified");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "line-length = 80\npreset = \"strict\"\n\n[lint]\nfunction-name-case = false\n\n[warnings]\nINTEGER_DIVISION = \"off\"\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let file = dir.join("a.gd");
+        assert_eq!(r.line_length_for(&file).unwrap(), 80);
+        assert!(!r.lint_config_for(&file).unwrap().is_enabled("function-name-case"));
+        let sc = r.severity_config_for(&file).unwrap();
+        assert_eq!(sc.action_for("INTEGER_DIVISION"), Action::Off);
+        assert_eq!(sc.action_for("UNSAFE_CAST"), Action::Error);
+    }
+
+    #[test]
+    fn forced_config_supplies_severity_config() {
+        let dir = scratch("sev-forced");
+        let cfg = dir.join("explicit.toml");
+        fs::write(&cfg, "[warnings]\nUNSAFE_CAST = \"off\"\n").unwrap();
+        let mut r = Resolver::new(Some(&cfg), None).unwrap();
+        let sc = r.severity_config_for(&dir.join("a.gd")).unwrap();
+        assert_eq!(sc.action_for("UNSAFE_CAST"), Action::Off); // override
+        assert_eq!(sc.action_for("UNTYPED_DECLARATION"), Action::Error); // strict default
+    }
+
+    #[test]
+    fn unknown_preset_is_an_error() {
+        let dir = scratch("sev-bad-preset");
+        fs::write(dir.join("gdstrict.toml"), "preset = \"pedantic\"\n").unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        assert!(r.severity_config_for(&dir.join("a.gd")).is_err());
+    }
+
+    #[test]
+    fn unknown_action_is_an_error() {
+        let dir = scratch("sev-bad-action");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "[warnings]\nINTEGER_DIVISION = \"fatal\"\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        assert!(r.severity_config_for(&dir.join("a.gd")).is_err());
+    }
+
+    #[test]
+    fn unknown_toplevel_key_is_rejected() {
+        // `deny_unknown_fields`: a typo'd key fails loudly instead of doing nothing.
+        let dir = scratch("sev-typo-key");
+        fs::write(dir.join("gdstrict.toml"), "line_length = 80\n").unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        assert!(r.line_length_for(&dir.join("a.gd")).is_err());
     }
 }

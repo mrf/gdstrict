@@ -34,7 +34,11 @@ pub enum Action {
 }
 
 impl Action {
-    fn parse(s: &str) -> Option<Action> {
+    /// Parse a severity action token (`error` | `warn`/`warning` | `off`).
+    ///
+    /// Public so a host that parses `gdstrict.toml` with a full TOML library (the
+    /// CLI) can reuse this canonical token set instead of duplicating it.
+    pub fn parse(s: &str) -> Option<Action> {
         match s {
             "error" => Some(Action::Error),
             "warn" | "warning" => Some(Action::Warn),
@@ -53,7 +57,11 @@ pub enum Preset {
 }
 
 impl Preset {
-    fn parse(s: &str) -> Option<Preset> {
+    /// Parse a preset name (only `strict` is known).
+    ///
+    /// Public for the same reason as [`Action::parse`]: the CLI parses the unified
+    /// `gdstrict.toml` with the `toml` crate and reuses this to validate `preset`.
+    pub fn parse(s: &str) -> Option<Preset> {
         match s {
             "strict" => Some(Preset::Strict),
             _ => None,
@@ -92,6 +100,16 @@ impl SeverityConfig {
             preset: Some(Preset::Strict),
             overrides: HashMap::new(),
         }
+    }
+
+    /// Build a config from an already-parsed preset and per-code overrides.
+    ///
+    /// The hand parser in [`parse`] is the zero-dependency path for pure-severity
+    /// files. This is the bridge for hosts that parse the *unified* `gdstrict.toml`
+    /// (line-length + lint + preset + warnings) with a full TOML library and just
+    /// need to hand the strict half back in structured form — no re-parsing.
+    pub fn from_parts(preset: Option<Preset>, overrides: HashMap<String, Action>) -> Self {
+        SeverityConfig { preset, overrides }
     }
 
     /// Resolve the configured action for a warning `code`.
@@ -171,7 +189,15 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Parse a `gdstrict.toml` severity profile (the small subset documented above).
+/// Parse a *pure-severity* `gdstrict.toml` (the small `preset` + `[warnings]`
+/// subset documented above) with no external dependency.
+///
+/// NOTE: the `gdstrict` CLI does **not** use this on real files. It parses the
+/// unified `gdstrict.toml` (which also carries `line-length` / `[lint]`, keys this
+/// hand parser rejects) with the `toml` crate and feeds the strict half back via
+/// [`SeverityConfig::from_parts`]. This parser is the zero-dependency entry point
+/// for library consumers that only have the severity subset. (gdstrict-4f3: if no
+/// such consumer materializes, this and [`ConfigError`] become deletable.)
 pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
     let mut cfg = SeverityConfig::default();
     let mut in_warnings = false;
