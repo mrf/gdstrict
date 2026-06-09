@@ -18,6 +18,17 @@
 //! pulls in serde_derive + syn): the grammar here is fixed and tiny. If the
 //! config surface grows beyond key/value + the `[warnings]` table, swap in the
 //! `toml` crate.
+//!
+//! ## Unified `gdstrict.toml` (shared with the formatter/linter)
+//!
+//! A single `gdstrict.toml` carries **both** this severity profile and the
+//! formatter/linter's settings (`line-length`, `[lint]`). Those belong to the
+//! CLI's format-side parser (`gdstrict-cli/src/config.rs`), which in turn ignores
+//! `preset`/`[warnings]`. To let one file satisfy both parsers, this parser
+//! *ignores* the format side's keys (`line-length`, the `[lint]` table) rather
+//! than rejecting them — but still rejects genuinely unknown keys/sections so a
+//! typo is caught instead of silently dropped. See that module for the full
+//! unified-schema rationale.
 
 use crate::{Diagnostic, Severity};
 use std::collections::HashMap;
@@ -92,6 +103,18 @@ impl SeverityConfig {
             preset: Some(Preset::Strict),
             overrides: HashMap::new(),
         }
+    }
+
+    /// Fall back to `preset` if this config did not name one, preserving any
+    /// per-code overrides. The caller uses this to keep strict-by-default: a
+    /// discovered `gdstrict.toml` that only tweaks formatting (or only sets a few
+    /// `[warnings]` overrides) still enforces the strict-typing family as errors,
+    /// instead of silently dropping to the all-`warn` baseline.
+    pub fn with_default_preset(mut self, preset: Preset) -> Self {
+        if self.preset.is_none() {
+            self.preset = Some(preset);
+        }
+        self
     }
 
     /// Resolve the configured action for a warning `code`.
@@ -171,10 +194,21 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Which TOML section the parser is currently inside.
+enum Section {
+    /// Top-level keys (before any `[table]`): `preset`, plus the ignored `line-length`.
+    Top,
+    /// The `[warnings]` table: per-code severity overrides.
+    Warnings,
+    /// A known-but-ignored table owned by the format-side parser (`[lint]`).
+    /// Its keys are skipped wholesale so the unified file parses on both sides.
+    Ignored,
+}
+
 /// Parse a `gdstrict.toml` severity profile (the small subset documented above).
 pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
     let mut cfg = SeverityConfig::default();
-    let mut in_warnings = false;
+    let mut section = Section::Top;
     for (i, raw) in src.lines().enumerate() {
         let lineno = i + 1;
         let line = strip_comment(raw).trim();
@@ -182,14 +216,23 @@ pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
             continue;
         }
         if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let section = inner.trim();
-            if section != "warnings" {
-                return Err(ConfigError::UnknownSection {
-                    line: lineno,
-                    name: section.to_string(),
-                });
-            }
-            in_warnings = true;
+            let name = inner.trim();
+            section = match name {
+                "warnings" => Section::Warnings,
+                // `[lint]` is the format-side parser's per-rule table; ignore it
+                // here so one unified gdstrict.toml satisfies both parsers.
+                "lint" => Section::Ignored,
+                _ => {
+                    return Err(ConfigError::UnknownSection {
+                        line: lineno,
+                        name: name.to_string(),
+                    })
+                }
+            };
+            continue;
+        }
+        // Skip the body of an ignored section without parsing its keys.
+        if matches!(section, Section::Ignored) {
             continue;
         }
         let (key, value) = line.split_once('=').ok_or_else(|| ConfigError::Malformed {
@@ -198,14 +241,15 @@ pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
         })?;
         let key = key.trim();
         let value = unquote(value.trim());
-        if in_warnings {
-            let action = Action::parse(&value).ok_or_else(|| ConfigError::UnknownAction {
-                line: lineno,
-                value: value.clone(),
-            })?;
-            cfg.overrides.insert(key.to_string(), action);
-        } else {
-            match key {
+        match section {
+            Section::Warnings => {
+                let action = Action::parse(&value).ok_or_else(|| ConfigError::UnknownAction {
+                    line: lineno,
+                    value: value.clone(),
+                })?;
+                cfg.overrides.insert(key.to_string(), action);
+            }
+            Section::Top => match key {
                 "preset" => {
                     cfg.preset =
                         Some(
@@ -215,13 +259,18 @@ pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
                             })?,
                         );
                 }
+                // `line-length` is the formatter's top-level key; ignore it so the
+                // unified file parses on the strict side too. A typo'd key (or the
+                // wrong spelling `line_length`) still falls through to UnknownKey.
+                "line-length" => {}
                 other => {
                     return Err(ConfigError::UnknownKey {
                         line: lineno,
                         name: other.to_string(),
                     });
                 }
-            }
+            },
+            Section::Ignored => unreachable!("ignored sections are skipped above"),
         }
     }
     Ok(cfg)
@@ -355,6 +404,52 @@ mod tests {
     fn rejects_unknown_toplevel_key() {
         let err = parse("line_length = 100\n").unwrap_err();
         assert!(matches!(err, ConfigError::UnknownKey { line: 1, .. }));
+    }
+
+    // ---- unified-schema tolerance ----------------------------------------
+
+    #[test]
+    fn ignores_format_side_line_length_key() {
+        // `line-length` (kebab) is the formatter's key; the strict parser ignores it.
+        let cfg = parse("line-length = 80\npreset = \"strict\"\n").unwrap();
+        assert_eq!(cfg.action_for("UNSAFE_CAST"), Action::Error);
+    }
+
+    #[test]
+    fn ignores_format_side_lint_section() {
+        let src = "preset = \"strict\"\n[lint]\nfunction-name-case = false\n\n[warnings]\nINTEGER_DIVISION = \"off\"\n";
+        let cfg = parse(src).unwrap();
+        assert_eq!(cfg.action_for("UNSAFE_CAST"), Action::Error); // from preset
+        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Off); // override honored
+    }
+
+    #[test]
+    fn parses_fully_unified_file() {
+        // One file exercising every knob of both parsers parses on the strict side.
+        let src = "line-length = 100\npreset = \"strict\"\n\n[lint]\nconstant-name-case = false\n\n[warnings]\nINTEGER_DIVISION = \"off\"\n";
+        let cfg = parse(src).unwrap();
+        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Error);
+        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Off);
+    }
+
+    // ---- with_default_preset ---------------------------------------------
+
+    #[test]
+    fn default_preset_fills_in_when_absent() {
+        let cfg = parse("[warnings]\nINTEGER_DIVISION = \"off\"\n")
+            .unwrap()
+            .with_default_preset(Preset::Strict);
+        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Error); // strict kicked in
+        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Off); // override preserved
+    }
+
+    #[test]
+    fn default_preset_does_not_override_explicit() {
+        // Only `strict` exists today, so assert the override survives the no-op default.
+        let cfg = parse("preset = \"strict\"\n[warnings]\nUNTYPED_DECLARATION = \"off\"\n")
+            .unwrap()
+            .with_default_preset(Preset::Strict);
+        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Off);
     }
 
     #[test]
