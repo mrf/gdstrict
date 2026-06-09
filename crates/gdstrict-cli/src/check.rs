@@ -40,7 +40,7 @@ use std::process::ExitCode;
 
 use gdstrict_strict::{Severity, SeverityConfig};
 
-use crate::config::{Resolver, SeverityResolver};
+use crate::config::Resolver;
 use crate::{format, walk, CheckArgs};
 
 /// Exit code for an operational/configuration error (distinct from "findings").
@@ -91,18 +91,6 @@ pub fn run(args: &CheckArgs) -> ExitCode {
         }
     };
 
-    // The strict severity profile is discovered per project from the same unified
-    // gdstrict.toml (or forced by `--config`), so per-code overrides like
-    // `INTEGER_DIVISION = "off"` are honored. Defaults to the built-in `strict`
-    // preset when no config is found. Parsed up front so a bad `--config` is one error.
-    let mut severity_resolver = match SeverityResolver::new(args.config.as_deref()) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::from(EXIT_ERROR);
-        }
-    };
-
     // Resolve the Godot binary before walking files, so "strict enabled but no
     // Godot" fails fast as a config error rather than after doing format+lint work.
     let godot = if args.no_strict {
@@ -130,6 +118,9 @@ pub fn run(args: &CheckArgs) -> ExitCode {
     // Memoize the project root (dir containing project.godot) per directory so a
     // large tree is not re-walked for every file.
     let mut project_cache: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    // The strict severity profile. Defaults to the built-in `strict` preset — the
+    // whole point of the tool — promoting the untyped/unsafe family to errors.
+    let severity = SeverityConfig::strict();
 
     // Strict's per-file Godot invocation is the slow part (~0.15s/run, Phase 0), so we
     // don't run it inline. The serial pass below does the cheap in-memory work
@@ -177,17 +168,7 @@ pub fn run(args: &CheckArgs) -> ExitCode {
 
         // ── strict (collect only) ─────────────────────────────────────────────
         if godot.is_some() {
-            let severity = match severity_resolver.severity_for(path) {
-                Ok(s) => s,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    report.had_error = true;
-                    continue;
-                }
-            };
-            if let Some(job) =
-                strict_job_for(path, &display, &mut project_cache, args.quiet, severity)
-            {
+            if let Some(job) = strict_job_for(path, &display, &mut project_cache, args.quiet) {
                 strict_jobs.push(job);
             }
         }
@@ -195,7 +176,7 @@ pub fn run(args: &CheckArgs) -> ExitCode {
 
     // ── strict (run concurrently, fold in order) ──────────────────────────────
     if let Some(godot) = &godot {
-        run_strict_jobs(godot, &strict_jobs, args.quiet, &mut report);
+        run_strict_jobs(godot, &severity, &strict_jobs, args.quiet, &mut report);
     }
 
     if !args.quiet {
@@ -204,14 +185,12 @@ pub fn run(args: &CheckArgs) -> ExitCode {
     report.exit_code()
 }
 
-/// A unit of strict work: the user-facing display path, the
-/// `(project_dir, script_rel)` pair [`gdstrict_strict::check_scripts`] consumes,
-/// and the severity profile resolved for this file's project.
+/// A unit of strict work: the user-facing display path plus the
+/// `(project_dir, script_rel)` pair [`gdstrict_strict::check_scripts`] consumes.
 struct StrictJob {
     display: String,
     project_dir: PathBuf,
     script_rel: String,
-    severity: SeverityConfig,
 }
 
 /// Resolve a file into a [`StrictJob`], or `None` when it cannot be type-checked
@@ -224,7 +203,6 @@ fn strict_job_for(
     display: &str,
     project_cache: &mut HashMap<PathBuf, Option<PathBuf>>,
     quiet: bool,
-    severity: SeverityConfig,
 ) -> Option<StrictJob> {
     let Some(project_dir) = find_project_root(path, project_cache) else {
         if !quiet {
@@ -245,7 +223,6 @@ fn strict_job_for(
         display: display.to_string(),
         project_dir,
         script_rel: script_rel.to_string_lossy().into_owned(),
-        severity,
     })
 }
 
@@ -253,7 +230,13 @@ fn strict_job_for(
 /// results into `report` **in job (file) order** so output and counts are deterministic
 /// regardless of which file's Godot run finished first. A failed/crashed job is recorded
 /// as an operational error for that file alone and never aborts the rest.
-fn run_strict_jobs(godot: &Path, jobs: &[StrictJob], quiet: bool, report: &mut Report) {
+fn run_strict_jobs(
+    godot: &Path,
+    severity: &SeverityConfig,
+    jobs: &[StrictJob],
+    quiet: bool,
+    report: &mut Report,
+) {
     if jobs.is_empty() {
         return;
     }
@@ -265,8 +248,7 @@ fn run_strict_jobs(godot: &Path, jobs: &[StrictJob], quiet: bool, report: &mut R
 
     for (job, result) in jobs.iter().zip(results) {
         let diags = match result {
-            // Each job applies its own project's severity profile.
-            Ok(d) => job.severity.apply(d),
+            Ok(d) => severity.apply(d),
             Err(err) => {
                 eprintln!("error: running strict check on {}: {err}", job.display);
                 report.had_error = true;
