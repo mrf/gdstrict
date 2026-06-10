@@ -51,7 +51,7 @@ mod classify;
 pub mod codes;
 mod config;
 pub use classify::{classifier_for, detect_version, ClassifierTable, GodotVersion};
-pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
+pub use config::{Action, Preset, SeverityConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
