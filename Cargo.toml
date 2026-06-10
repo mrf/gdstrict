@@ -13,6 +13,21 @@ version = "0.0.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/mrf/gdstrict"
+description = "Fast GDScript formatter and strict-typing enforcement layer"
+
+[workspace.metadata.dist]
+# Config for cargo-dist (https://github.com/axodotdev/cargo-dist).
+# Hand-authored following 0.22.x conventions; run `cargo dist init` to regenerate.
+cargo-dist-version = "0.22.1"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-musl",
+]
 
 [workspace.dependencies]
 tree-sitter = "0.24"
