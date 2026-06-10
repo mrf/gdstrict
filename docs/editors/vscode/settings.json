@@ -1,0 +1,11 @@
+{
+  "emeraldwalk.runonsave": {
+    "commands": [
+      {
+        "match": "\\.gd$",
+        "cmd": "${workspaceFolder}/target/release/gdstrict format ${file}",
+        "runIn": "backend"
+      }
+    ]
+  }
+}

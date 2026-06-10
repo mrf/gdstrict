@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "gdstrict: check format",
+      "type": "shell",
+      "command": "${workspaceFolder}/target/release/gdstrict",
+      "args": ["format", "--check", "."],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gdstrict: format all",
+      "type": "shell",
+      "command": "${workspaceFolder}/target/release/gdstrict",
+      "args": ["format", "."],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

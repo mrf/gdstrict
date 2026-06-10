@@ -141,6 +141,20 @@ cargo clippy --workspace --all-targets -- -D warnings   # lint gate
 
 CI runs the formatting and clippy gates on Linux, and builds and tests on Linux, macOS, and Windows. See [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
+## Editor Integration
+
+### VS Code
+
+Format on save and a check task are documented in [docs/editors/vscode.md](docs/editors/vscode.md). A ready-to-copy `.vscode/` directory is included at the repo root — copy it into your Godot project and adjust the binary path.
+
+Quick start:
+
+1. Install the [Run on Save](https://marketplace.visualstudio.com/items?itemName=emeraldwalk.RunOnSave) extension.
+2. Copy `docs/editors/vscode/settings.json` from this repo into your project's `.vscode/` directory.
+3. Point the `cmd` at your `gdstrict` binary.
+
+Every `.gd` save will then run `gdstrict format` in the background. See the [full guide](docs/editors/vscode.md) for the check task and other options.
+
 ## Roadmap
 
 - Wire the strict-mode driver to a `gdstrict check` command, including the warning-to-severity profile and a `strict` preset.
