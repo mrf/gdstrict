@@ -961,7 +961,9 @@ mod tests {
 
     #[test]
     fn find_godot_absent_when_dir_has_no_godot() {
-        let (dir, _fake) = make_fake_godot("find-absent", false);
+        // Genuinely empty dir — no godot file at all. (The non-executable-file case
+        // is platform-dependent and covered by `find_godot_skips_non_executable_file`.)
+        let dir = scratch_dir("find-absent");
         assert_eq!(find_godot_in_dirs([dir.clone()]), None);
         std::fs::remove_dir_all(&dir).ok();
     }
