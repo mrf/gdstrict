@@ -14,12 +14,11 @@ Most mature language ecosystems have a settled answer to "how should this code l
 - **GDQuest's GDScript-formatter** (Rust, tree-sitter, Topiary) is fast and a pleasure to use. Its Topiary-based engine intentionally leaves long lines as written rather than auto-wrapping them, and it stays focused on formatting and style rather than type-aware strict mode.
 - **Godot's own `GDScriptAnalyzer`** is the real type checker in the ecosystem, and gdstrict's strict mode is built directly on top of it. It knows `UNTYPED_DECLARATION`, `INFERRED_DECLARATION`, and the whole `UNSAFE_*` family. It lives inside the engine, though, and surfacing its warnings cleanly in a batch CI run takes some driving, which is exactly the gap gdstrict's strict-mode layer fills.
 
-The opportunity is a single standalone tool that does two things well:
+The opportunity is a single standalone tool that does three things well:
 
 1. Formats deterministically, like `black`, with automatic line wrapping.
-2. Enforces strict typing by failing the build on untyped or unsafe code.
-
-No single tool ships that combined workflow today. That is the niche gdstrict aims to fill, building on the tools above rather than replacing them.
+2. Enforces naming conventions and code quality rules without needing Godot.
+3. Enforces strict typing by failing the build on untyped or unsafe code.
 
 ## Philosophy
 
@@ -35,20 +34,14 @@ gdstrict is built on a few firm opinions.
 
 **Comments and whitespace are first-class.** Comment handling is exactly where formatters break, so the parser treats comments, blank lines, doc comments, annotations, backslash continuations, and multiline strings as significant trivia, with golden tests covering them.
 
-**Lean on prior art.** gdstrict does not hand-write a parser (it uses `tree-sitter-gdscript`), it does not reinvent a style contract (it copies the documented `black` and `ruff` behavior), and it does not reinvent type checking (it wraps Godot). The novel work is the combination and the strict-mode driver, not the parts that already exist.
-
 ## Status
-
-gdstrict is early and under active development. Here is the honest state of each piece.
 
 | Capability | Crate | Status |
 |---|---|---|
-| Formatter (parse, document IR, width-aware wrapping) | `gdstrict-format` | Working. Exposed via the `format` command. |
-| CLI (`format`, `--check`, `--diff`, config discovery) | `gdstrict-cli` | Working. |
-| Strict-mode driver (headless Godot, two-pass error and warning extraction, `override.cfg` injection, warning-to-severity mapping) | `gdstrict-strict` | Functional as a library. Not yet wired to a CLI subcommand. |
-| Syntactic naming rules (snake_case, PascalCase, CONSTANT_CASE, signal names) | `gdstrict-lint` | Functional as a library. Not yet wired to a CLI subcommand. |
-
-What you can run today is `gdstrict format`. The `check` (strict) and `lint` commands are next on the roadmap; the engines behind them already exist and are tested.
+| Formatter (parse, document IR, width-aware wrapping) | `gdstrict-format` | Working. Exposed via `format`. |
+| Syntactic lint rules (naming conventions, dead code, structure) | `gdstrict-lint` | Working. Exposed via `lint`. |
+| CLI (`format`, `check`, `lint`, config discovery) | `gdstrict-cli` | Working. |
+| Strict-mode driver (headless Godot, diagnostic extraction, warning-to-severity mapping) | `gdstrict-strict` | Working. Exposed via `check`. |
 
 ## Install
 
@@ -61,9 +54,11 @@ cargo build --release
 # the binary lands at target/release/gdstrict
 ```
 
-Strict mode (once wired to the CLI) additionally requires a Godot binary on your machine. The formatter and linter never need Godot.
+Strict mode (`check` without `--no-strict`) additionally requires a Godot binary on your machine. The formatter and linter never need Godot.
 
-## Usage
+## Commands
+
+### `format` — rewrite GDScript files to canonical style
 
 ```sh
 # Rewrite every .gd file under the current directory in place.
@@ -81,40 +76,206 @@ gdstrict format --line-length 120 .
 
 Directories are walked recursively. gdstrict respects `.gdignore` and gitignore rules so it does not touch vendored or generated code.
 
-### Exit codes
+**Exit codes:** `0` — success (files written, or nothing would change under `--check`). `1` — under `--check`, at least one file would change; or an error occurred.
 
-These are designed for pre-commit hooks and CI:
+### `lint` — syntactic style rules (no Godot needed)
 
-- `0`: success. Files were written, or nothing would change under `--check`.
-- `1`: under `--check`, at least one file would change, or an error occurred.
+```sh
+# Lint every .gd file under the current directory.
+gdstrict lint .
+
+# Use a specific config file.
+gdstrict lint --config path/to/gdstrict.toml src/
+```
+
+Runs the full naming-convention and code-quality rule set against the CST. No Godot binary required. See [Lint rules](#lint-rules) for the complete catalog.
+
+**Exit codes:** `0` — no findings. `1` — at least one finding or an error occurred.
+
+### `check` — aggregate CI gate (format + lint + strict)
+
+```sh
+# Full check: format-check + lint + strict type-checking.
+gdstrict check .
+
+# Strict requires a Godot binary. Point at one explicitly:
+gdstrict check --godot /path/to/godot .
+
+# Or skip the strict-typing pass entirely (no Godot needed):
+gdstrict check --no-strict .
+
+# Suppress per-finding output; only the summary and exit code remain.
+gdstrict check --quiet .
+```
+
+Runs three passes in one shot:
+
+1. **format-check** — same as `format --check`; a file that would change is a violation.
+2. **lint** — full syntactic rule set.
+3. **strict** — headless Godot analysis; diagnostics are mapped to `error`/`warn`/`off` by the severity profile from `gdstrict.toml`. Only `error`-level findings fail the gate; `warn`-level findings are printed but do not cause exit 1.
+
+Godot binary discovery order: `--godot <path>` → `$GODOT` env var → `PATH`.
+
+**Exit codes:** `0` — clean. `1` — at least one format/lint/strict violation. `2` — operational or configuration error (bad path, invalid config, or strict enabled but no Godot binary found).
 
 ## Configuration
 
-Configuration is intentionally minimal. A `gdstrict.toml` is a tiny TOML file with a single recognized key:
+A `gdstrict.toml` is the one place a project configures every gdstrict subsystem. All keys are optional; omitting the file entirely is valid and applies built-in defaults.
 
 ```toml
+# Maximum line length before the formatter wraps (default: 100).
 line-length = 100
+
+# Strict-mode severity preset (only "strict" is known; default when key is absent: strict).
+preset = "strict"
+
+[lint]
+# Disable individual lint rules by setting them to false.
+# All rules are enabled by default.
+function-name-case = false
+constant-name-case = false
+
+[warnings]
+# Per-code severity overrides for the strict pass.
+# Valid values: "error" | "warn" | "off"
+# Overrides beat the preset; unrecognized codes get the preset's default (warn).
+INTEGER_DIVISION = "off"
+RETURN_VALUE_DISCARDED = "warn"
 ```
 
-Resolution precedence (highest wins):
+Unknown top-level keys are rejected (a typo like `line_length` instead of `line-length` fails loudly rather than silently doing nothing).
 
-1. `--line-length <n>` on the command line.
-2. `--config <file>`, used verbatim for every file.
-3. The nearest `gdstrict.toml`, found by walking up the directory tree from each file (the `black` and `ruff` discovery model).
-4. The built-in default of 100.
+**Config discovery** (highest precedence first):
+
+1. `--line-length <n>` on the command line overrides line length for every file.
+2. `--config <file>` — use this exact file for every input file, skipping discovery.
+3. The nearest `gdstrict.toml` found by walking up the directory tree from each input file (the `black` / `ruff` discovery model).
+4. Built-in defaults: `line-length = 100`, `preset = "strict"`.
+
+### The `strict` preset
+
+The built-in `strict` preset is applied by default whenever `gdstrict.toml` is absent or has no `preset` key. It promotes the following Godot warning codes to **errors** (failing `check` exit 1):
+
+| Code | What it catches |
+|---|---|
+| `UNTYPED_DECLARATION` | Variables, parameters, or return types with no static type annotation |
+| `INFERRED_DECLARATION` | Variables inferred from a `Variant` value — typed as `Variant`, not the real type |
+| `UNSAFE_CAST` | An explicit cast that may fail at runtime |
+| `UNSAFE_METHOD_ACCESS` | Calling a method not present on the inferred (Variant) type |
+| `UNSAFE_PROPERTY_ACCESS` | Accessing a property not present on the inferred (Variant) type |
+| `UNSAFE_CALL_ARGUMENT` | Passing a Variant where a typed argument is expected |
+| `RETURN_VALUE_DISCARDED` | Ignoring a function's return value |
+
+All other Godot warning codes default to **warn** under the `strict` preset (they are surfaced but do not fail the gate). You can demote, silence, or promote any code with a `[warnings]` override.
+
+## Lint rules
+
+All rules are enabled by default and can be disabled individually via the `[lint]` config table.
+
+### Naming conventions
+
+| Rule | What it checks |
+|---|---|
+| `function-name-case` | Function names must be `snake_case` (leading `_` for private is fine) |
+| `variable-name-case` | Variable names must be `snake_case`, including local variables |
+| `parameter-name-case` | Function and signal parameter names must be `snake_case` |
+| `constant-name-case` | Constant names must be `SCREAMING_SNAKE_CASE` |
+| `signal-name-case` | Signal names must be `snake_case` |
+| `class-name-case` | Class and inner class names must be `PascalCase` |
+| `enum-name-case` | Enum type names must be `PascalCase` |
+| `enum-value-case` | Enum member names must be `SCREAMING_SNAKE_CASE` |
+
+### Dead and redundant code
+
+| Rule | What it checks |
+|---|---|
+| `unused-argument` | Function arguments never referenced in the body (prefix `_` to silence) |
+| `unnecessary-pass` | A `pass` statement in a body that has other statements |
+| `expression-not-assigned` | An expression used as a statement whose result is discarded (calls and `await` are exempt) |
+| `no-else-return` | An `else` clause following an `if` body that always returns |
+| `no-elif-return` | An `elif` clause following an `if` body that always returns |
+| `comparison-with-itself` | A comparison operator with identical left and right operands (e.g. `x == x`) |
+| `duplicated-load` | A `load()` or `preload()` call for a path that already appeared earlier in the file |
+
+### Structure
+
+| Rule | Default limit | What it checks |
+|---|---|---|
+| `class-definitions-order` | — | Class members must follow Godot's canonical order: tool/class annotations → `class_name` → `extends` → signals → enums → constants → exported vars → public vars → private vars → onready vars → methods |
+| `private-method-call` | — | Calling a private method (leading `_`) on another object |
+| `max-line-length` | 100 | Lines longer than `line-length` characters |
+| `function-arguments-number` | 10 | Functions with more parameters than the limit |
+| `max-public-methods` | 20 | Classes with more public methods than the limit |
+
+## CI setup
+
+The minimal CI configuration runs formatting, clippy, and tests on Linux, macOS, and Windows. Add a strict job when you want type checking against a pinned Godot release:
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  strict:
+    runs-on: ubuntu-latest
+    env:
+      GODOT_VERSION: 4.6.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Godot (headless)
+        run: |
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+          zip="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          curl -fsSL "${base}/${zip}" -o /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo install -m755 "/tmp/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+      - run: cargo test --workspace
+        env:
+          GODOT: /usr/local/bin/godot
+```
+
+**Pin the Godot version.** Godot's warning output is not a stable API; gdstrict version-gates its diagnostic parser against tested releases. Float the version only when you also update and verify the parser.
 
 ## How gdstrict compares
 
 | | Formats | Auto-wraps long lines | Style lint | Real type checking | Engine |
 |---|---|---|---|---|---|
-| **gdstrict** | yes | yes | planned | yes (wraps Godot) | Rust + tree-sitter |
+| **gdstrict** | yes | yes | yes | yes (wraps Godot) | Rust + tree-sitter |
 | gdformat / gdlint | yes | no | yes (syntactic) | no | Python + lark |
 | GDQuest formatter | yes | no | yes (syntactic) | no | Rust + Topiary |
 | Godot `--check-only` | no | no | no | yes | the engine |
 
 ## Architecture
 
-A Cargo workspace that produces one distributable CLI binary. The pipeline is `source -> parse -> { format | lint | strict }`. Formatting never needs Godot (the fast path); strict mode shells out to the engine.
+A Cargo workspace that produces one distributable CLI binary. The pipeline is `source -> parse -> { format | lint | strict }`. Formatting and linting never need Godot (the fast path); strict mode shells out to the engine.
 
 ```
 gdstrict/
@@ -143,9 +304,10 @@ CI runs the formatting and clippy gates on Linux, and builds and tests on Linux,
 
 ## Roadmap
 
-- Wire the strict-mode driver to a `gdstrict check` command, including the warning-to-severity profile and a `strict` preset.
-- Wire the naming rules to a `gdstrict lint` command.
-- Distribution: a pre-commit hook, a GitHub Action, and prebuilt binaries for Linux, macOS, and Windows.
+- Prebuilt binaries for Linux, macOS, and Windows (cargo-dist).
+- A `.pre-commit-hooks.yaml` so projects can install gdstrict as a pre-commit hook.
+- A reusable GitHub Action wrapping the Godot install + `gdstrict check` flow.
+- VS Code task / extension integration.
 
 ## License
 
