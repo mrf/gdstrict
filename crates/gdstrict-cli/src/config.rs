@@ -12,10 +12,7 @@
 //! This module is the **single parse authority** for that file: it parses the
 //! whole thing with the `toml` crate and hands the strict half to the
 //! `gdstrict-strict` crate as a structured [`gdstrict_strict::SeverityConfig`]
-//! (via [`gdstrict_strict::SeverityConfig::from_parts`]). The strict crate keeps
-//! its own zero-dependency hand parser for pure-severity inputs, but never sees a
-//! unified file — so the format and severity keys can coexist without either
-//! parser rejecting the other's keys.
+//! (via [`gdstrict_strict::SeverityConfig::from_parts`]).
 //!
 //! Precedence, highest first:
 //!   1. `--line-length <n>` — overrides line length for every file.

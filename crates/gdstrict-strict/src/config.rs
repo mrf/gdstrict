@@ -4,20 +4,9 @@
 //! `gdstrict.toml` profile resolves every warning code to an [`Action`]; the
 //! built-in `strict` [`Preset`] turns the strict-typing family into hard errors.
 //!
-//! ## Config format (a deliberately small TOML subset)
-//!
-//! ```toml
-//! preset = "strict"          # optional; known: "strict"
-//!
-//! [warnings]                 # optional per-code overrides (beat the preset)
-//! INTEGER_DIVISION = "off"
-//! RETURN_VALUE_DISCARDED = "warn"
-//! ```
-//!
-//! We hand-parse this subset rather than depend on the full `toml` crate (which
-//! pulls in serde_derive + syn): the grammar here is fixed and tiny. If the
-//! config surface grows beyond key/value + the `[warnings]` table, swap in the
-//! `toml` crate.
+//! The gdstrict CLI is the single parse authority for `gdstrict.toml`; it uses
+//! the `toml` crate and feeds the strict half back via [`SeverityConfig::from_parts`].
+//! [`Action::parse`] and [`Preset::parse`] are the shared canonical token decoders.
 
 use crate::{codes, Diagnostic, Severity};
 use std::collections::HashMap;
@@ -104,10 +93,8 @@ impl SeverityConfig {
 
     /// Build a config from an already-parsed preset and per-code overrides.
     ///
-    /// The hand parser in [`parse`] is the zero-dependency path for pure-severity
-    /// files. This is the bridge for hosts that parse the *unified* `gdstrict.toml`
-    /// (line-length + lint + preset + warnings) with a full TOML library and just
-    /// need to hand the strict half back in structured form — no re-parsing.
+    /// Used by the CLI: it parses the unified `gdstrict.toml` with the `toml` crate
+    /// and hands the strict half back here without re-parsing.
     pub fn from_parts(preset: Option<Preset>, overrides: HashMap<String, Action>) -> Self {
         SeverityConfig { preset, overrides }
     }
@@ -150,128 +137,6 @@ impl SeverityConfig {
                 }
             })
             .collect()
-    }
-}
-
-/// A parse failure in a `gdstrict.toml` severity profile, with the 1-based line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
-    Malformed { line: usize, text: String },
-    UnknownSection { line: usize, name: String },
-    UnknownKey { line: usize, name: String },
-    UnknownPreset { line: usize, name: String },
-    UnknownAction { line: usize, value: String },
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Malformed { line, text } => {
-                write!(f, "line {line}: expected `key = value`, got `{text}`")
-            }
-            ConfigError::UnknownSection { line, name } => write!(
-                f,
-                "line {line}: unknown section [{name}] (only [warnings] is supported)"
-            ),
-            ConfigError::UnknownKey { line, name } => {
-                write!(f, "line {line}: unknown key `{name}`")
-            }
-            ConfigError::UnknownPreset { line, name } => {
-                write!(f, "line {line}: unknown preset `{name}` (known: strict)")
-            }
-            ConfigError::UnknownAction { line, value } => write!(
-                f,
-                "line {line}: unknown action `{value}` (expected error|warn|off)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-/// Parse a *pure-severity* `gdstrict.toml` (the small `preset` + `[warnings]`
-/// subset documented above) with no external dependency.
-///
-/// NOTE: the `gdstrict` CLI does **not** use this on real files. It parses the
-/// unified `gdstrict.toml` (which also carries `line-length` / `[lint]`, keys this
-/// hand parser rejects) with the `toml` crate and feeds the strict half back via
-/// [`SeverityConfig::from_parts`]. This parser is the zero-dependency entry point
-/// for library consumers that only have the severity subset. (gdstrict-4f3: if no
-/// such consumer materializes, this and [`ConfigError`] become deletable.)
-pub fn parse(src: &str) -> Result<SeverityConfig, ConfigError> {
-    let mut cfg = SeverityConfig::default();
-    let mut in_warnings = false;
-    for (i, raw) in src.lines().enumerate() {
-        let lineno = i + 1;
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let section = inner.trim();
-            if section != "warnings" {
-                return Err(ConfigError::UnknownSection {
-                    line: lineno,
-                    name: section.to_string(),
-                });
-            }
-            in_warnings = true;
-            continue;
-        }
-        let (key, value) = line.split_once('=').ok_or_else(|| ConfigError::Malformed {
-            line: lineno,
-            text: line.to_string(),
-        })?;
-        let key = key.trim();
-        let value = unquote(value.trim());
-        if in_warnings {
-            let action = Action::parse(&value).ok_or_else(|| ConfigError::UnknownAction {
-                line: lineno,
-                value: value.clone(),
-            })?;
-            cfg.overrides.insert(key.to_string(), action);
-        } else {
-            match key {
-                "preset" => {
-                    cfg.preset =
-                        Some(
-                            Preset::parse(&value).ok_or_else(|| ConfigError::UnknownPreset {
-                                line: lineno,
-                                name: value.clone(),
-                            })?,
-                        );
-                }
-                other => {
-                    return Err(ConfigError::UnknownKey {
-                        line: lineno,
-                        name: other.to_string(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(cfg)
-}
-
-/// Trim a trailing `#` line comment, ignoring `#` inside a double-quoted string.
-fn strip_comment(line: &str) -> &str {
-    let mut in_quote = false;
-    for (idx, b) in line.bytes().enumerate() {
-        match b {
-            b'"' => in_quote = !in_quote,
-            b'#' if !in_quote => return &line[..idx],
-            _ => {}
-        }
-    }
-    line
-}
-
-/// Strip surrounding double quotes if present; otherwise return as-is.
-fn unquote(s: &str) -> String {
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
     }
 }
 
@@ -320,80 +185,15 @@ mod tests {
         assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Warn);
     }
 
-    // ---- parsing (positive) ----------------------------------------------
-
-    #[test]
-    fn parses_preset_only() {
-        let cfg = parse("preset = \"strict\"\n").unwrap();
-        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error);
-    }
-
-    #[test]
-    fn override_beats_preset() {
-        let src = "preset = \"strict\"\n\n[warnings]\nUNTYPED_DECLARATION = \"off\"\nINTEGER_DIVISION = \"error\"\n";
-        let cfg = parse(src).unwrap();
-        assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Off); // override wins
-        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error); // still from preset
-        assert_eq!(cfg.action_for(codes::INTEGER_DIVISION), Action::Error); // raised by override
-    }
-
-    #[test]
-    fn handles_comments_blank_lines_and_warning_alias() {
-        let src = "# top comment\npreset = \"strict\"   # inline\n\n[warnings]  # section\n  RETURN_VALUE_DISCARDED = \"warning\"  # alias for warn\n";
-        let cfg = parse(src).unwrap();
-        assert_eq!(cfg.action_for(codes::RETURN_VALUE_DISCARDED), Action::Warn);
-    }
-
-    #[test]
-    fn accepts_bare_unquoted_values() {
-        let cfg = parse("preset = strict\n[warnings]\nINTEGER_DIVISION = off\n").unwrap();
-        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error);
-        assert_eq!(cfg.action_for(codes::INTEGER_DIVISION), Action::Off);
-    }
-
-    #[test]
-    fn empty_config_is_all_warn() {
-        let cfg = parse("\n# just a comment\n\n").unwrap();
-        assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Warn);
-    }
-
-    // ---- parsing (negative) ----------------------------------------------
-
-    #[test]
-    fn rejects_unknown_preset() {
-        let err = parse("preset = \"pedantic\"\n").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownPreset { line: 1, .. }));
-    }
-
-    #[test]
-    fn rejects_unknown_action() {
-        let err = parse("[warnings]\nUNTYPED_DECLARATION = \"fatal\"\n").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownAction { line: 2, .. }));
-    }
-
-    #[test]
-    fn rejects_unknown_section() {
-        let err = parse("[format]\nx = 1\n").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownSection { line: 1, .. }));
-    }
-
-    #[test]
-    fn rejects_unknown_toplevel_key() {
-        let err = parse("line_length = 100\n").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownKey { line: 1, .. }));
-    }
-
-    #[test]
-    fn rejects_malformed_line() {
-        let err = parse("preset\n").unwrap_err();
-        assert!(matches!(err, ConfigError::Malformed { line: 1, .. }));
-    }
-
     // ---- apply() ----------------------------------------------------------
 
     #[test]
-    fn apply_promotes_filters_and_preserves_errors() {
-        let cfg = parse("preset = \"strict\"\n[warnings]\nINTEGER_DIVISION = \"off\"\n").unwrap();
+    fn apply_promotes_errors_and_filters_off() {
+        let cfg = {
+            let mut overrides = std::collections::HashMap::new();
+            overrides.insert(codes::INTEGER_DIVISION.to_string(), Action::Off);
+            SeverityConfig::from_parts(Some(Preset::Strict), overrides)
+        };
         let raw = vec![
             warn(Some(codes::UNTYPED_DECLARATION)),  // -> error
             warn(Some(codes::INTEGER_DIVISION)),     // -> dropped (off)
