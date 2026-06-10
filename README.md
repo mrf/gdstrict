@@ -88,6 +88,34 @@ These are designed for pre-commit hooks and CI:
 - `0`: success. Files were written, or nothing would change under `--check`.
 - `1`: under `--check`, at least one file would change, or an error occurred.
 
+## pre-commit hooks
+
+gdstrict ships a [`pre-commit`](https://pre-commit.com/) hook definition. Add it to your `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/mrf/gdstrict
+    rev: v0.1.0  # pin to a release tag
+    hooks:
+      # Fail if any staged .gd file is not formatted.
+      - id: gdstrict-format
+
+      # Fail on untyped or unsafe GDScript declarations (requires Godot on PATH).
+      - id: gdstrict-check
+```
+
+`gdstrict-format` does not need Godot and is fast — suitable for every project. `gdstrict-check` shells out to the Godot binary; enable it only if you have Godot installed in CI.
+
+If Godot is not on `PATH`, point `gdstrict-check` at it via the `GDSTRICT_GODOT` environment variable:
+
+```yaml
+      - id: gdstrict-check
+        env:
+          GDSTRICT_GODOT: /path/to/godot
+```
+
+Both hooks are built from source on first use via `cargo install`. Subsequent runs reuse the cached binary.
+
 ## Configuration
 
 Configuration is intentionally minimal. A `gdstrict.toml` is a tiny TOML file with a single recognized key:
