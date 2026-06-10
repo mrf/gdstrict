@@ -141,6 +141,61 @@ cargo clippy --workspace --all-targets -- -D warnings   # lint gate
 
 CI runs the formatting and clippy gates on Linux, and builds and tests on Linux, macOS, and Windows. See [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
+## GitHub Action
+
+gdstrict ships a reusable composite action (`action.yml` at the repo root) that installs gdstrict and runs format/lint/check steps inside any Godot project's CI.
+
+### Minimal workflow
+
+```yaml
+# .github/workflows/gdstrict.yml
+name: GDScript quality
+
+on: [push, pull_request]
+
+jobs:
+  gdstrict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mrf/gdstrict@main
+```
+
+This runs `gdstrict format --check` and `gdstrict lint` on the repository root by default.
+
+### With strict-typing check (requires Godot)
+
+The `check` command drives Godot's own analyzer and requires a Godot binary. Pin the version to match your project's `gdstrict.toml` — Godot's diagnostic output is an unstable contract.
+
+```yaml
+- uses: mrf/gdstrict@main
+  with:
+    install-godot: 'true'
+    godot-version: '4.6.2'   # pin to the version your project targets
+    run-check: 'true'
+```
+
+### Inputs
+
+| Input | Default | Description |
+|---|---|---|
+| `version` | `main` | Git ref (branch, tag, SHA) of gdstrict to install. |
+| `install-method` | `cargo-install` | Install method. Only `cargo-install` is supported today (prebuilt binaries are not yet shipped). |
+| `install-godot` | `false` | Install a headless Godot binary. Required when `run-check: true`. Linux runners only. |
+| `godot-version` | `4.6.2` | Godot release to install. Pin this deliberately — see note above. |
+| `run-format-check` | `true` | Run `gdstrict format --check`. Exits 1 if any file would change. |
+| `run-lint` | `true` | Run `gdstrict lint` (syntactic naming rules). |
+| `run-check` | `false` | Run `gdstrict check` (strict-typing via headless Godot). Requires `install-godot: true`. |
+| `working-directory` | `.` | Directory to run gdstrict commands in. Must be a Godot project root. |
+
+### Outputs
+
+| Output | Description |
+|---|---|
+| `gdstrict-version` | The installed gdstrict version string. |
+
+> **Note:** `gdstrict lint` and `gdstrict check` are currently in active development. The formatter (`gdstrict format --check`) is the stable command today. The action is designed to run all three so no workflow changes are needed when `lint` and `check` reach stable CLI status.
+
 ## Roadmap
 
 - Wire the strict-mode driver to a `gdstrict check` command, including the warning-to-severity profile and a `strict` preset.
