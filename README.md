@@ -52,16 +52,38 @@ What you can run today is `gdstrict format`. The `check` (strict) and `lint` com
 
 ## Install
 
-gdstrict is a Rust workspace. Until prebuilt binaries ship, build from source:
+### Prebuilt binaries (recommended)
+
+Static binaries for Linux (x86_64 and aarch64), macOS (Intel and Apple Silicon), and Windows (x86_64) are published with every tagged release.
+
+**Linux and macOS** — shell installer:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/mrf/gdstrict/releases/latest/download/gdstrict-installer.sh \
+  | sh
+```
+
+**Windows** — PowerShell installer:
+
+```pwsh
+irm https://github.com/mrf/gdstrict/releases/latest/download/gdstrict-installer.ps1 | iex
+```
+
+**Direct download** — grab a `.tar.gz` (Linux/macOS) or `.zip` (Windows) from the [Releases page](https://github.com/mrf/gdstrict/releases), extract, and put the `gdstrict` binary on your `PATH`.
+
+### Build from source
+
+Requires a [Rust toolchain](https://rustup.rs).
 
 ```sh
 git clone https://github.com/mrf/gdstrict
 cd gdstrict
 cargo build --release
-# the binary lands at target/release/gdstrict
+# binary lands at target/release/gdstrict
 ```
 
-Strict mode (once wired to the CLI) additionally requires a Godot binary on your machine. The formatter and linter never need Godot.
+Strict mode additionally requires a Godot binary on your machine. The formatter and linter never need Godot.
 
 ## Usage
 

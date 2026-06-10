@@ -1,0 +1,120 @@
+# Release workflow — hand-authored following cargo-dist 0.22.x conventions.
+# Run `cargo dist init` to regenerate from the [workspace.metadata.dist] config.
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Validate the dist config and capture the tag for downstream jobs.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ github.ref_name }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-cargo-dist
+      - name: Validate release plan
+        run: |
+          cargo dist plan --tag=${{ github.ref_name }} --output-format=json \
+            | tee dist-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+
+  # Compile one static archive per target platform.
+  build-local:
+    needs: plan
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: ./.github/actions/install-cargo-dist
+      - name: Build local artifacts
+        run: |
+          cargo dist build \
+            --tag=${{ needs.plan.outputs.tag }} \
+            --artifacts=local \
+            --target=${{ matrix.target }} \
+            --output-format=json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: dist/artifacts
+          if-no-files-found: error
+
+  # Generate the shell and PowerShell install scripts (global artifacts).
+  build-global:
+    needs: plan
+    name: build (global)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-cargo-dist
+      - name: Build global artifacts (install scripts)
+        run: |
+          cargo dist build \
+            --tag=${{ needs.plan.outputs.tag }} \
+            --artifacts=global \
+            --output-format=json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-global
+          path: dist/artifacts
+          if-no-files-found: error
+
+  # Collect every artifact and publish the GitHub release.
+  publish:
+    needs: [plan, build-local, build-global]
+    name: publish
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+          merge-multiple: true
+      - uses: ./.github/actions/install-cargo-dist
+      - name: Create GitHub release
+        run: |
+          cargo dist publish \
+            --tag=${{ needs.plan.outputs.tag }} \
+            --artifacts=all \
+            --output-format=json
