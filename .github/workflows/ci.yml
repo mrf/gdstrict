@@ -57,7 +57,9 @@ jobs:
   # (PLAN.md §7), so the version is pinned and bumped deliberately alongside the
   # diagnostic parser — never floated to "latest".
   strict:
-    name: strict acceptance (Godot ${{ env.GODOT_VERSION }})
+    # NB: the `env` context is not available in a job's `name`, so the version
+    # is written literally here and kept in sync with GODOT_VERSION below.
+    name: strict acceptance (Godot 4.6.2)
     runs-on: ubuntu-latest
     env:
       # Pinned Godot version. Must match the parser's supported release
