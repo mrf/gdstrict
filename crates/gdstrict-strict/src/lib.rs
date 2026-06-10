@@ -393,11 +393,13 @@ pub fn check_project_batch(
     // Force the strict warning set on for both passes; restored on drop (incl. `?`).
     let _warnings = StrictWarnings::install(project_dir)?;
 
+    // Detect the binary's version once (cached per path) so the message classifier
+    // uses the table that matches this Godot. `None` falls back to the newest table.
+    let version = detect_version(godot);
+
     // Pass 1: errors over the whole corpus, no --debug (safe).
     let err_stderr = run_harness(godot, project_dir, script_rels, false)?;
-    // Merge-resolution: 6zk.5 added a version param to parse_diagnostics; batch mode
-    // does no version detection, so pass None (fallback classifier). See follow-up issue.
-    let mut diags = parse_diagnostics(&err_stderr, None);
+    let mut diags = parse_diagnostics(&err_stderr, version);
 
     // Files that produced a hard error must be excluded from the --debug pass, or the
     // debugger break would crash it. Errors carry the `res://` file they hit.
@@ -415,7 +417,7 @@ pub fn check_project_batch(
     // Pass 2: warnings over the error-free files, --debug (safe — nothing to break on).
     if !clean.is_empty() {
         let warn_stderr = run_harness(godot, project_dir, &clean, true)?;
-        diags.extend(parse_diagnostics(&warn_stderr, None));
+        diags.extend(parse_diagnostics(&warn_stderr, version));
     }
     Ok(diags)
 }
