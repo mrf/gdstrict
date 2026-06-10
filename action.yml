@@ -1,0 +1,101 @@
+name: 'gdstrict'
+description: >
+  Install gdstrict and run format --check, lint, and/or check on a GDScript
+  project. Optionally installs a pinned Godot binary for the strict-typing
+  check command (Linux runners only).
+
+inputs:
+  version:
+    description: >
+      Git ref (branch, tag, or commit SHA) of gdstrict to install when
+      install-method is cargo-install.  Ignored when install-method is
+      prebuilt (not yet available).
+    required: false
+    default: 'main'
+  install-method:
+    description: >
+      How to install gdstrict.  Only 'cargo-install' is supported today
+      (prebuilt binaries are not yet shipped).
+    required: false
+    default: 'cargo-install'
+  install-godot:
+    description: >
+      Install a headless Godot binary so the check command can run the
+      engine's own strict-typing analyzer.  Only works on Linux runners.
+      Must be 'true' when run-check is 'true'.
+    required: false
+    default: 'false'
+  godot-version:
+    description: >
+      Godot release version to install, e.g. '4.6.2'.  This should be pinned
+      to the version the project's gdstrict.toml was tuned for.  Bumping it is
+      a deliberate act — Godot's diagnostic output is an unstable contract and
+      a new release may change which warnings fire.
+    required: false
+    default: '4.6.2'
+  run-format-check:
+    description: 'Run gdstrict format --check (exits 1 if any file would change).'
+    required: false
+    default: 'true'
+  run-lint:
+    description: 'Run gdstrict lint (syntactic naming rules).'
+    required: false
+    default: 'true'
+  run-check:
+    description: >
+      Run gdstrict check (strict-typing enforcement via headless Godot).
+      Requires install-godot: true.
+    required: false
+    default: 'false'
+  working-directory:
+    description: 'Directory to run gdstrict commands in (must be a Godot project root).'
+    required: false
+    default: '.'
+
+outputs:
+  gdstrict-version:
+    description: 'The installed gdstrict version string.'
+    value: ${{ steps.install-gdstrict.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain (cargo-install method)
+      if: inputs.install-method == 'cargo-install'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install gdstrict
+      id: install-gdstrict
+      if: inputs.install-method == 'cargo-install'
+      shell: bash
+      run: |
+        cargo install \
+          --git https://github.com/mrf/gdstrict \
+          --rev "${{ inputs.version }}" \
+          --locked \
+          gdstrict-cli
+        echo "version=$(gdstrict --version 2>&1 || echo unknown)" >> "$GITHUB_OUTPUT"
+
+    - name: Install Godot ${{ inputs.godot-version }} (headless, Linux only)
+      if: inputs.install-godot == 'true'
+      uses: ./.github/actions/install-godot
+      with:
+        godot-version: ${{ inputs.godot-version }}
+
+    - name: gdstrict format --check
+      if: inputs.run-format-check == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: gdstrict format --check .
+
+    - name: gdstrict lint
+      if: inputs.run-lint == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: gdstrict lint .
+
+    - name: gdstrict check
+      if: inputs.run-check == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: gdstrict check .
