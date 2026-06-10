@@ -1,0 +1,20 @@
+- id: gdstrict-format
+  name: gdstrict format (check)
+  description: >-
+    Checks that GDScript files are formatted with gdstrict. Exits non-zero if
+    any staged file would be rewritten. Does not require Godot.
+  language: rust
+  entry: gdstrict format --check
+  files: '\.gd$'
+  pass_filenames: true
+
+- id: gdstrict-check
+  name: gdstrict check (strict typing)
+  description: >-
+    Runs gdstrict's strict-mode type checker on staged GDScript files. Exits
+    non-zero on any untyped or unsafe declaration. Requires a Godot binary on
+    PATH (or pointed to by GDSTRICT_GODOT).
+  language: rust
+  entry: gdstrict check
+  files: '\.gd$'
+  pass_filenames: true
