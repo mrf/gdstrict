@@ -48,6 +48,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 mod classify;
+pub mod codes;
 mod config;
 pub use classify::{classifier_for, detect_version, ClassifierTable, GodotVersion};
 pub use config::{parse as parse_config, Action, ConfigError, Preset, SeverityConfig};
@@ -719,7 +720,7 @@ mod tests {
         assert_eq!(d[0].severity, Severity::Warning);
         assert_eq!(d[0].file, "res://unsafe.gd");
         assert_eq!(d[0].line, 7);
-        assert_eq!(d[0].code, Some("UNTYPED_DECLARATION"));
+        assert_eq!(d[0].code, Some(crate::codes::UNTYPED_DECLARATION));
     }
 
     #[test]
@@ -934,11 +935,11 @@ mod tests {
         let diags = check_project_batch(&godot, project, &["unsafe.gd".to_string()]).unwrap();
         let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
         assert!(
-            codes.contains(&"UNSAFE_METHOD_ACCESS"),
+            codes.contains(&crate::codes::UNSAFE_METHOD_ACCESS),
             "batch lost warnings: {diags:#?}"
         );
-        assert!(codes.contains(&"UNTYPED_DECLARATION"));
-        assert!(codes.contains(&"INTEGER_DIVISION"));
+        assert!(codes.contains(&crate::codes::UNTYPED_DECLARATION));
+        assert!(codes.contains(&crate::codes::INTEGER_DIVISION));
         // Note: no override.cfg-leak assertion here — this shares the `strict_project`
         // fixture with `live_strict_extraction`, whose still-live refcounted guard can
         // legitimately keep override.cfg present while this test runs. The no-leak
@@ -1047,11 +1048,11 @@ mod tests {
         let diags = check_script(&godot, Path::new(project), "unsafe.gd").unwrap();
         let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
         assert!(
-            codes.contains(&"UNSAFE_METHOD_ACCESS"),
+            codes.contains(&crate::codes::UNSAFE_METHOD_ACCESS),
             "expected UNSAFE_METHOD_ACCESS, got {diags:#?}"
         );
-        assert!(codes.contains(&"UNTYPED_DECLARATION"));
-        assert!(codes.contains(&"INTEGER_DIVISION"));
+        assert!(codes.contains(&crate::codes::UNTYPED_DECLARATION));
+        assert!(codes.contains(&crate::codes::INTEGER_DIVISION));
     }
 
     /// Acceptance (clean half): the fully-typed fixture project must yield **no**
@@ -1101,11 +1102,11 @@ mod tests {
         let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
         // These are all set to 0 in the fixture's project.godot.
         assert!(
-            codes.contains(&"UNSAFE_METHOD_ACCESS"),
+            codes.contains(&crate::codes::UNSAFE_METHOD_ACCESS),
             "injection failed: project disables this warning, got {diags:#?}"
         );
-        assert!(codes.contains(&"UNTYPED_DECLARATION"));
-        assert!(codes.contains(&"INTEGER_DIVISION"));
+        assert!(codes.contains(&crate::codes::UNTYPED_DECLARATION));
+        assert!(codes.contains(&crate::codes::INTEGER_DIVISION));
 
         // The guard must leave no trace in the source tree after the check.
         assert!(
@@ -1149,7 +1150,7 @@ mod tests {
             let diags = h.join().unwrap();
             let codes: Vec<_> = diags.iter().filter_map(|d| d.code).collect();
             assert!(
-                codes.contains(&"UNSAFE_METHOD_ACCESS"),
+                codes.contains(&crate::codes::UNSAFE_METHOD_ACCESS),
                 "a concurrent check lost its injected warnings: {diags:#?}"
             );
         }

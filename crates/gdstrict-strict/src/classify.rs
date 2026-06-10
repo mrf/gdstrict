@@ -13,6 +13,7 @@
 //! version where it changed and the gate picks it up automatically — no caller change,
 //! no silent misclassification on the version that diverged.
 
+use crate::codes;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -149,29 +150,29 @@ fn select_table(
 fn classify_4x(msg: &str) -> Option<&'static str> {
     let m = msg;
     if m.contains("has no static type") {
-        Some("UNTYPED_DECLARATION")
+        Some(codes::UNTYPED_DECLARATION)
     } else if m.contains("is not present on the inferred type") && m.contains("method") {
-        Some("UNSAFE_METHOD_ACCESS")
+        Some(codes::UNSAFE_METHOD_ACCESS)
     } else if m.contains("is not present on the inferred type") {
-        Some("UNSAFE_PROPERTY_ACCESS")
+        Some(codes::UNSAFE_PROPERTY_ACCESS)
     } else if m.starts_with("Casting") && m.contains("unsafe") {
-        Some("UNSAFE_CAST")
+        Some(codes::UNSAFE_CAST)
     } else if m.contains("returns a value that will be discarded") {
-        Some("RETURN_VALUE_DISCARDED")
+        Some(codes::RETURN_VALUE_DISCARDED)
     } else if m.starts_with("Integer division") {
-        Some("INTEGER_DIVISION")
+        Some(codes::INTEGER_DIVISION)
     } else if m.contains("inferred from a Variant value") {
-        Some("INFERRED_DECLARATION")
+        Some(codes::INFERRED_DECLARATION)
     } else if m.contains("is declared but never used in the block") {
         // Godot 4.6.2: `The local variable "x" is declared but never used in
         // the block.` Distinct from unused_parameter ("is never used in the
         // function").
-        Some("UNUSED_VARIABLE")
+        Some(codes::UNUSED_VARIABLE)
     } else if m.contains("is shadowing an already-declared") {
         // Godot 4.6.2: `The local variable "x" is shadowing an
         // already-declared variable at line N in the current class.` Also
         // fires for the "local function parameter" variant.
-        Some("SHADOWED_VARIABLE")
+        Some(codes::SHADOWED_VARIABLE)
     } else {
         None
     }
@@ -377,28 +378,28 @@ mod tests {
         let cases = [
             (
                 r#"Variable "thing" has no static type."#,
-                "UNTYPED_DECLARATION",
+                codes::UNTYPED_DECLARATION,
             ),
             (
                 r#"The method "do_something()" is not present on the inferred type "Node"."#,
-                "UNSAFE_METHOD_ACCESS",
+                codes::UNSAFE_METHOD_ACCESS,
             ),
             (
                 r#"The property "some_property" is not present on the inferred type "Node"."#,
-                "UNSAFE_PROPERTY_ACCESS",
+                codes::UNSAFE_PROPERTY_ACCESS,
             ),
-            (r#"Casting "x" to "int" is unsafe."#, "UNSAFE_CAST"),
+            (r#"Casting "x" to "int" is unsafe."#, codes::UNSAFE_CAST),
             (
                 r#"The function "compute_value()" returns a value that will be discarded if you don't use it."#,
-                "RETURN_VALUE_DISCARDED",
+                codes::RETURN_VALUE_DISCARDED,
             ),
             (
                 "Integer division, decimal part will be discarded.",
-                "INTEGER_DIVISION",
+                codes::INTEGER_DIVISION,
             ),
             (
                 r#"The variable type is being inferred from a Variant value, so it will be typed as Variant."#,
-                "INFERRED_DECLARATION",
+                codes::INFERRED_DECLARATION,
             ),
         ];
         for (msg, want) in cases {
@@ -417,14 +418,14 @@ mod tests {
     fn classify_4x_maps_unused_variable() {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         let msg = r#"The local variable "never_used" is declared but never used in the block. If this is intended, prefix it with an underscore: "_never_used"."#;
-        assert_eq!(table.classify(msg), Some("UNUSED_VARIABLE"));
+        assert_eq!(table.classify(msg), Some(codes::UNUSED_VARIABLE));
     }
 
     #[test]
     fn classify_4x_maps_shadowed_variable() {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         let msg = r#"The local variable "member_value" is shadowing an already-declared variable at line 3 in the current class."#;
-        assert_eq!(table.classify(msg), Some("SHADOWED_VARIABLE"));
+        assert_eq!(table.classify(msg), Some(codes::SHADOWED_VARIABLE));
     }
 
     #[test]
@@ -432,7 +433,7 @@ mod tests {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         // shadowed_variable also fires for function parameters
         let msg = r#"The local function parameter "member_value" is shadowing an already-declared variable at line 3 in the current class."#;
-        assert_eq!(table.classify(msg), Some("SHADOWED_VARIABLE"));
+        assert_eq!(table.classify(msg), Some(codes::SHADOWED_VARIABLE));
     }
 
     #[test]
@@ -451,11 +452,11 @@ mod tests {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         assert_eq!(
             table.classify(r#"The method "f()" is not present on the inferred type "Variant"."#),
-            Some("UNSAFE_METHOD_ACCESS")
+            Some(codes::UNSAFE_METHOD_ACCESS)
         );
         assert_eq!(
             table.classify(r#"The property "p" is not present on the inferred type "Variant"."#),
-            Some("UNSAFE_PROPERTY_ACCESS")
+            Some(codes::UNSAFE_PROPERTY_ACCESS)
         );
     }
 
