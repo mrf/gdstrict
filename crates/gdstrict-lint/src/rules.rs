@@ -1024,9 +1024,7 @@ impl Rule for MaxPublicMethods {
         let mut cursor = node.walk();
         let count = node
             .named_children(&mut cursor)
-            .filter(|child| {
-                child.kind() == "function_definition" && !name_is_private(*child, ctx)
-            })
+            .filter(|child| child.kind() == "function_definition" && !name_is_private(*child, ctx))
             .count();
         if count > self.limit {
             let limit = self.limit;
@@ -1560,7 +1558,8 @@ mod tests {
 
     #[test]
     fn accepts_elif_after_non_returning_if() {
-        let src = "func foo(x: int) -> void:\n\tif x > 0:\n\t\tprint(x)\n\telif x == 0:\n\t\tprint(0)\n";
+        let src =
+            "func foo(x: int) -> void:\n\tif x > 0:\n\t\tprint(x)\n\telif x == 0:\n\t\tprint(0)\n";
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "no-elif-return")
@@ -1625,8 +1624,7 @@ mod tests {
 
     #[test]
     fn flags_duplicate_load() {
-        let src =
-            "var a = load(\"res://foo.png\")\nvar b = load(\"res://foo.png\")\n";
+        let src = "var a = load(\"res://foo.png\")\nvar b = load(\"res://foo.png\")\n";
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "duplicated-load")
@@ -1647,8 +1645,7 @@ mod tests {
 
     #[test]
     fn accepts_different_load_paths() {
-        let src =
-            "var a = load(\"res://foo.png\")\nvar b = load(\"res://bar.png\")\n";
+        let src = "var a = load(\"res://foo.png\")\nvar b = load(\"res://bar.png\")\n";
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "duplicated-load")
@@ -1658,8 +1655,7 @@ mod tests {
 
     #[test]
     fn flags_duplicate_preload() {
-        let src =
-            "var a = preload(\"res://bar.tres\")\nvar b = preload(\"res://bar.tres\")\n";
+        let src = "var a = preload(\"res://bar.tres\")\nvar b = preload(\"res://bar.tres\")\n";
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "duplicated-load")
@@ -1669,8 +1665,7 @@ mod tests {
 
     #[test]
     fn load_and_preload_same_path_are_not_duplicates() {
-        let src =
-            "var a = load(\"res://foo.png\")\nvar b = preload(\"res://foo.png\")\n";
+        let src = "var a = load(\"res://foo.png\")\nvar b = preload(\"res://foo.png\")\n";
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "duplicated-load")
@@ -1892,10 +1887,7 @@ mod tests {
 
     #[test]
     fn accepts_methods_within_limit() {
-        let src = concat!(
-            "func a() -> void:\n\tpass\n",
-            "func b() -> void:\n\tpass\n",
-        );
+        let src = concat!("func a() -> void:\n\tpass\n", "func b() -> void:\n\tpass\n",);
         let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxPublicMethods::new(2))];
         let diags = crate::lint_with(src, &rules);
         assert!(diags.is_empty(), "got: {diags:#?}");

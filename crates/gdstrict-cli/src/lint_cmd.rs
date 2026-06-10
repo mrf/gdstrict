@@ -58,7 +58,10 @@ pub fn run(paths: &[PathBuf], resolver: &mut Resolver) -> ExitCode {
             // GCC/Clang/rustc-compatible format: editors parse "file:line:col:" for
             // jump-to-location. Any future strict-mode render path must use the same
             // format so editor integrations work uniformly across both diagnostic streams.
-            eprintln!("{display}:{}:{}: {sev}[{}]: {}", d.line, d.column, d.rule, d.message);
+            eprintln!(
+                "{display}:{}:{}: {sev}[{}]: {}",
+                d.line, d.column, d.rule, d.message
+            );
         }
     }
 

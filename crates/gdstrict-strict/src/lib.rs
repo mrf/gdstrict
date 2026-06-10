@@ -525,8 +525,7 @@ where
     // Shared cursor hands out the next job index; each slot is written exactly once
     // (by the worker that claimed that index), so distinct slots never contend.
     let cursor = AtomicUsize::new(0);
-    let slots: Vec<Mutex<Option<thread::Result<T>>>> =
-        (0..n).map(|_| Mutex::new(None)).collect();
+    let slots: Vec<Mutex<Option<thread::Result<T>>>> = (0..n).map(|_| Mutex::new(None)).collect();
 
     thread::scope(|scope| {
         for _ in 0..workers {
@@ -1001,6 +1000,9 @@ mod tests {
         let dir = scratch_dir(tag);
         let fake = dir.join("godot");
         std::fs::write(&fake, b"#!/bin/sh\necho godot 4.0\n").unwrap();
+        // `executable` only matters on Unix; on Windows existence implies executable.
+        #[cfg(not(unix))]
+        let _ = executable;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1138,9 +1140,7 @@ mod tests {
             .map(|_| {
                 let godot = godot.clone();
                 let project = project.clone();
-                std::thread::spawn(move || {
-                    check_script(&godot, &project, "unsafe.gd").unwrap()
-                })
+                std::thread::spawn(move || check_script(&godot, &project, "unsafe.gd").unwrap())
             })
             .collect();
         for h in handles {
@@ -1170,7 +1170,10 @@ mod tests {
         let cpus = thread::available_parallelism()
             .map(|c| c.get())
             .unwrap_or(1);
-        assert!(n <= cpus.max(1), "worker count {n} exceeds cpu count {cpus}");
+        assert!(
+            n <= cpus.max(1),
+            "worker count {n} exceeds cpu count {cpus}"
+        );
     }
 
     /// Results come back in input order, `result[i] == work(i)`, no matter which
@@ -1263,10 +1266,15 @@ mod tests {
             .filter(|n| n.ends_with(".gd"))
             .collect();
         rels.sort();
-        assert!(rels.len() >= 2, "need multiple scripts to exercise concurrency");
+        assert!(
+            rels.len() >= 2,
+            "need multiple scripts to exercise concurrency"
+        );
 
-        let jobs: Vec<(PathBuf, String)> =
-            rels.iter().map(|r| (project.to_path_buf(), r.clone())).collect();
+        let jobs: Vec<(PathBuf, String)> = rels
+            .iter()
+            .map(|r| (project.to_path_buf(), r.clone()))
+            .collect();
         let results = check_scripts(&godot, &jobs);
 
         assert_eq!(results.len(), jobs.len(), "one result per job, in order");

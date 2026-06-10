@@ -460,7 +460,10 @@ mod tests {
         let mut r = Resolver::new(None, None).unwrap();
         let file = dir.join("a.gd");
         assert_eq!(r.line_length_for(&file).unwrap(), 80);
-        assert!(!r.lint_config_for(&file).unwrap().is_enabled("function-name-case"));
+        assert!(!r
+            .lint_config_for(&file)
+            .unwrap()
+            .is_enabled("function-name-case"));
         let sc = r.severity_config_for(&file).unwrap();
         assert_eq!(sc.action_for("INTEGER_DIVISION"), Action::Off);
         assert_eq!(sc.action_for("UNSAFE_CAST"), Action::Error);

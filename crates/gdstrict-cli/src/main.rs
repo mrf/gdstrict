@@ -20,7 +20,11 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gdstrict", version, about = "The strict-mode Godot formatter and linter")]
+#[command(
+    name = "gdstrict",
+    version,
+    about = "The strict-mode Godot formatter and linter"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

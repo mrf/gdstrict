@@ -177,7 +177,8 @@ pub fn run(args: &CheckArgs) -> ExitCode {
                     continue;
                 }
             };
-            if let Some(job) = strict_job_for(path, &display, &mut project_cache, args.quiet, severity)
+            if let Some(job) =
+                strict_job_for(path, &display, &mut project_cache, args.quiet, severity)
             {
                 strict_jobs.push(job);
             }

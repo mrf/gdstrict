@@ -387,8 +387,8 @@ fn check_strict_flags_unsafe_fixture_with_exact_codes() {
         eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
         return;
     }
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/strict_project/unsafe.gd");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/strict_project/unsafe.gd");
     let out = Command::new(bin())
         .args(["check"])
         .arg(&fixture)
@@ -502,10 +502,7 @@ fn check_no_strict_passes_without_godot() {
 
 #[test]
 fn lint_exits_zero_on_clean_file() {
-    let file = temp_file(
-        "lint_clean.gd",
-        "func do_thing() -> void:\n\tpass\n",
-    );
+    let file = temp_file("lint_clean.gd", "func do_thing() -> void:\n\tpass\n");
     let out = Command::new(bin())
         .args(["lint"])
         .arg(&file)
@@ -521,20 +518,13 @@ fn lint_exits_zero_on_clean_file() {
 
 #[test]
 fn lint_exits_nonzero_on_violation() {
-    let file = temp_file(
-        "lint_violation.gd",
-        "func DoThing() -> void:\n\tpass\n",
-    );
+    let file = temp_file("lint_violation.gd", "func DoThing() -> void:\n\tpass\n");
     let out = Command::new(bin())
         .args(["lint"])
         .arg(&file)
         .output()
         .expect("run gdstrict lint");
-    assert_eq!(
-        code(&out),
-        1,
-        "file with PascalCase function should exit 1"
-    );
+    assert_eq!(code(&out), 1, "file with PascalCase function should exit 1");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("function-name-case"),

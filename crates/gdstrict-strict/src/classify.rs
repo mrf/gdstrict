@@ -135,7 +135,11 @@ fn select_table(
         return tables.last().expect("at least one classifier table");
     };
     // Newest table at or below `v`; if `v` predates every table, use the oldest.
-    tables.iter().rev().find(|t| t.min_version <= v).unwrap_or(first)
+    tables
+        .iter()
+        .rev()
+        .find(|t| t.min_version <= v)
+        .unwrap_or(first)
 }
 
 /// Message → warning code for the Godot 4.x release line.
@@ -233,21 +237,27 @@ mod tests {
             GodotVersion::parse("4.5.stable.official"),
             Some(GodotVersion::new(4, 5, 0))
         );
-        assert_eq!(
-            GodotVersion::parse("4.4"),
-            Some(GodotVersion::new(4, 4, 0))
-        );
+        assert_eq!(GodotVersion::parse("4.4"), Some(GodotVersion::new(4, 4, 0)));
     }
 
     #[test]
     fn parses_real_pinned_release_strings() {
         // Representative `--version` strings across pinned 4.x releases.
         let cases = [
-            ("4.2.2.stable.official.15073afe3", GodotVersion::new(4, 2, 2)),
+            (
+                "4.2.2.stable.official.15073afe3",
+                GodotVersion::new(4, 2, 2),
+            ),
             ("4.3.stable.official.77dcf97d8", GodotVersion::new(4, 3, 0)),
-            ("4.4.1.stable.official.49a5bc7b6", GodotVersion::new(4, 4, 1)),
+            (
+                "4.4.1.stable.official.49a5bc7b6",
+                GodotVersion::new(4, 4, 1),
+            ),
             ("4.5.stable.official.fe733bd35", GodotVersion::new(4, 5, 0)),
-            ("4.6.2.stable.official.71f334935", GodotVersion::new(4, 6, 2)),
+            (
+                "4.6.2.stable.official.71f334935",
+                GodotVersion::new(4, 6, 2),
+            ),
         ];
         for (s, want) in cases {
             assert_eq!(GodotVersion::parse(s), Some(want), "parsing {s}");
@@ -333,7 +343,10 @@ mod tests {
 
         let pick = |v: GodotVersion| select_table(SYNTH, Some(v)).label();
         // Below every table → oldest.
-        assert_eq!(select_table(SYNTH, Some(GodotVersion::new(3, 9, 0))).label(), "old");
+        assert_eq!(
+            select_table(SYNTH, Some(GodotVersion::new(3, 9, 0))).label(),
+            "old"
+        );
         // Exact lower bound is inclusive.
         assert_eq!(pick(GodotVersion::new(4, 0, 0)), "old");
         assert_eq!(pick(GodotVersion::new(4, 4, 9)), "old");
@@ -352,7 +365,10 @@ mod tests {
     fn classify_4x_maps_known_messages() {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         let cases = [
-            (r#"Variable "thing" has no static type."#, "UNTYPED_DECLARATION"),
+            (
+                r#"Variable "thing" has no static type."#,
+                "UNTYPED_DECLARATION",
+            ),
             (
                 r#"The method "do_something()" is not present on the inferred type "Node"."#,
                 "UNSAFE_METHOD_ACCESS",
@@ -361,15 +377,15 @@ mod tests {
                 r#"The property "some_property" is not present on the inferred type "Node"."#,
                 "UNSAFE_PROPERTY_ACCESS",
             ),
-            (
-                r#"Casting "x" to "int" is unsafe."#,
-                "UNSAFE_CAST",
-            ),
+            (r#"Casting "x" to "int" is unsafe."#, "UNSAFE_CAST"),
             (
                 r#"The function "compute_value()" returns a value that will be discarded if you don't use it."#,
                 "RETURN_VALUE_DISCARDED",
             ),
-            ("Integer division, decimal part will be discarded.", "INTEGER_DIVISION"),
+            (
+                "Integer division, decimal part will be discarded.",
+                "INTEGER_DIVISION",
+            ),
             (
                 r#"The variable type is being inferred from a Variant value, so it will be typed as Variant."#,
                 "INFERRED_DECLARATION",
