@@ -407,6 +407,20 @@ The `check` command drives Godot's own analyzer and requires a Godot binary. Pin
 
 > **Note:** `gdstrict lint` and `gdstrict check` are currently in active development. The formatter (`gdstrict format --check`) is the stable command today. The action is designed to run all three so no workflow changes are needed when `lint` and `check` reach stable CLI status.
 
+## Editor Integration
+
+### VS Code
+
+Format on save and a check task are documented in [docs/editors/vscode.md](docs/editors/vscode.md). Ready-to-copy config files live in [docs/editors/vscode/](docs/editors/vscode/) — copy them into your Godot project's `.vscode/` directory and adjust the binary path.
+
+Quick start:
+
+1. Install the [Run on Save](https://marketplace.visualstudio.com/items?itemName=emeraldwalk.RunOnSave) extension.
+2. Copy `docs/editors/vscode/settings.json` from this repo into your project's `.vscode/` directory.
+3. Point the `cmd` at your `gdstrict` binary.
+
+Every `.gd` save will then run `gdstrict format` in the background. See the [full guide](docs/editors/vscode.md) for the check task and other options.
+
 ## Roadmap
 
 - Prebuilt binaries for Linux, macOS, and Windows (cargo-dist).
