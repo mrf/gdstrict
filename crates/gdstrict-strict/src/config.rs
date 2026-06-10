@@ -19,7 +19,7 @@
 //! config surface grows beyond key/value + the `[warnings]` table, swap in the
 //! `toml` crate.
 
-use crate::{Diagnostic, Severity};
+use crate::{codes, Diagnostic, Severity};
 use std::collections::HashMap;
 
 /// What gdstrict does with a diagnostic of a given warning code.
@@ -72,9 +72,9 @@ impl Preset {
     fn action(self, code: &str) -> Action {
         match self {
             Preset::Strict => match code {
-                "UNTYPED_DECLARATION" | "INFERRED_DECLARATION" | "RETURN_VALUE_DISCARDED" => {
-                    Action::Error
-                }
+                codes::UNTYPED_DECLARATION
+                | codes::INFERRED_DECLARATION
+                | codes::RETURN_VALUE_DISCARDED => Action::Error,
                 c if c.starts_with("UNSAFE_") => Action::Error,
                 _ => Action::Warn,
             },
@@ -295,12 +295,12 @@ mod tests {
     fn strict_preset_promotes_typing_family() {
         let cfg = SeverityConfig::strict();
         for code in [
-            "UNTYPED_DECLARATION",
-            "INFERRED_DECLARATION",
-            "RETURN_VALUE_DISCARDED",
-            "UNSAFE_METHOD_ACCESS",
-            "UNSAFE_PROPERTY_ACCESS",
-            "UNSAFE_CAST",
+            codes::UNTYPED_DECLARATION,
+            codes::INFERRED_DECLARATION,
+            codes::RETURN_VALUE_DISCARDED,
+            codes::UNSAFE_METHOD_ACCESS,
+            codes::UNSAFE_PROPERTY_ACCESS,
+            codes::UNSAFE_CAST,
             "UNSAFE_CALL_ARGUMENT", // not yet classified, but the family rule still promotes it
         ] {
             assert_eq!(cfg.action_for(code), Action::Error, "code {code}");
@@ -310,14 +310,14 @@ mod tests {
     #[test]
     fn strict_preset_leaves_others_as_warn() {
         let cfg = SeverityConfig::strict();
-        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Warn);
+        assert_eq!(cfg.action_for(codes::INTEGER_DIVISION), Action::Warn);
         assert_eq!(cfg.action_for("SOMETHING_ELSE"), Action::Warn);
     }
 
     #[test]
     fn no_preset_defaults_to_warn() {
         let cfg = SeverityConfig::default();
-        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Warn);
+        assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Warn);
     }
 
     // ---- parsing (positive) ----------------------------------------------
@@ -325,36 +325,36 @@ mod tests {
     #[test]
     fn parses_preset_only() {
         let cfg = parse("preset = \"strict\"\n").unwrap();
-        assert_eq!(cfg.action_for("UNSAFE_CAST"), Action::Error);
+        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error);
     }
 
     #[test]
     fn override_beats_preset() {
         let src = "preset = \"strict\"\n\n[warnings]\nUNTYPED_DECLARATION = \"off\"\nINTEGER_DIVISION = \"error\"\n";
         let cfg = parse(src).unwrap();
-        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Off); // override wins
-        assert_eq!(cfg.action_for("UNSAFE_CAST"), Action::Error); // still from preset
-        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Error); // raised by override
+        assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Off); // override wins
+        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error); // still from preset
+        assert_eq!(cfg.action_for(codes::INTEGER_DIVISION), Action::Error); // raised by override
     }
 
     #[test]
     fn handles_comments_blank_lines_and_warning_alias() {
         let src = "# top comment\npreset = \"strict\"   # inline\n\n[warnings]  # section\n  RETURN_VALUE_DISCARDED = \"warning\"  # alias for warn\n";
         let cfg = parse(src).unwrap();
-        assert_eq!(cfg.action_for("RETURN_VALUE_DISCARDED"), Action::Warn);
+        assert_eq!(cfg.action_for(codes::RETURN_VALUE_DISCARDED), Action::Warn);
     }
 
     #[test]
     fn accepts_bare_unquoted_values() {
         let cfg = parse("preset = strict\n[warnings]\nINTEGER_DIVISION = off\n").unwrap();
-        assert_eq!(cfg.action_for("UNSAFE_CAST"), Action::Error);
-        assert_eq!(cfg.action_for("INTEGER_DIVISION"), Action::Off);
+        assert_eq!(cfg.action_for(codes::UNSAFE_CAST), Action::Error);
+        assert_eq!(cfg.action_for(codes::INTEGER_DIVISION), Action::Off);
     }
 
     #[test]
     fn empty_config_is_all_warn() {
         let cfg = parse("\n# just a comment\n\n").unwrap();
-        assert_eq!(cfg.action_for("UNTYPED_DECLARATION"), Action::Warn);
+        assert_eq!(cfg.action_for(codes::UNTYPED_DECLARATION), Action::Warn);
     }
 
     // ---- parsing (negative) ----------------------------------------------
@@ -395,9 +395,9 @@ mod tests {
     fn apply_promotes_filters_and_preserves_errors() {
         let cfg = parse("preset = \"strict\"\n[warnings]\nINTEGER_DIVISION = \"off\"\n").unwrap();
         let raw = vec![
-            warn(Some("UNTYPED_DECLARATION")),  // -> error
-            warn(Some("INTEGER_DIVISION")),     // -> dropped (off)
-            warn(Some("UNSAFE_METHOD_ACCESS")), // -> error
+            warn(Some(codes::UNTYPED_DECLARATION)),  // -> error
+            warn(Some(codes::INTEGER_DIVISION)),     // -> dropped (off)
+            warn(Some(codes::UNSAFE_METHOD_ACCESS)), // -> error
             Diagnostic {
                 severity: Severity::Error, // hard error: untouched
                 file: "res://x.gd".to_string(),
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(out.len(), 3); // INTEGER_DIVISION dropped
         let promoted = out.iter().filter(|d| d.severity == Severity::Error).count();
         assert_eq!(promoted, 3); // two promoted warnings + the original error
-        assert!(out.iter().all(|d| d.code != Some("INTEGER_DIVISION")));
+        assert!(out.iter().all(|d| d.code != Some(codes::INTEGER_DIVISION)));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn apply_default_config_is_passthrough() {
         let cfg = SeverityConfig::default();
-        let out = cfg.apply(vec![warn(Some("UNTYPED_DECLARATION")), warn(None)]);
+        let out = cfg.apply(vec![warn(Some(codes::UNTYPED_DECLARATION)), warn(None)]);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|d| d.severity == Severity::Warning));
     }
