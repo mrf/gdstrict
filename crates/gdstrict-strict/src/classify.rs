@@ -162,6 +162,16 @@ fn classify_4x(msg: &str) -> Option<&'static str> {
         Some("INTEGER_DIVISION")
     } else if m.contains("inferred from a Variant value") {
         Some("INFERRED_DECLARATION")
+    } else if m.contains("is declared but never used in the block") {
+        // Godot 4.6.2: `The local variable "x" is declared but never used in
+        // the block.` Distinct from unused_parameter ("is never used in the
+        // function").
+        Some("UNUSED_VARIABLE")
+    } else if m.contains("is shadowing an already-declared") {
+        // Godot 4.6.2: `The local variable "x" is shadowing an
+        // already-declared variable at line N in the current class.` Also
+        // fires for the "local function parameter" variant.
+        Some("SHADOWED_VARIABLE")
     } else {
         None
     }
@@ -401,6 +411,36 @@ mod tests {
         let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
         assert_eq!(table.classify("Some warning we do not map yet."), None);
         assert_eq!(table.classify(""), None);
+    }
+
+    #[test]
+    fn classify_4x_maps_unused_variable() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        let msg = r#"The local variable "never_used" is declared but never used in the block. If this is intended, prefix it with an underscore: "_never_used"."#;
+        assert_eq!(table.classify(msg), Some("UNUSED_VARIABLE"));
+    }
+
+    #[test]
+    fn classify_4x_maps_shadowed_variable() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        let msg = r#"The local variable "member_value" is shadowing an already-declared variable at line 3 in the current class."#;
+        assert_eq!(table.classify(msg), Some("SHADOWED_VARIABLE"));
+    }
+
+    #[test]
+    fn classify_4x_maps_shadowed_parameter() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        // shadowed_variable also fires for function parameters
+        let msg = r#"The local function parameter "member_value" is shadowing an already-declared variable at line 3 in the current class."#;
+        assert_eq!(table.classify(msg), Some("SHADOWED_VARIABLE"));
+    }
+
+    #[test]
+    fn classify_4x_unused_parameter_does_not_map_to_unused_variable() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        // unused_parameter has a distinct message and must not match UNUSED_VARIABLE
+        let msg = r#"The parameter "x" is never used in the function "helper"."#;
+        assert_eq!(table.classify(msg), None);
     }
 
     /// Method-vs-property discrimination: both share the "is not present on the
