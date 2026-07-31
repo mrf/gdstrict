@@ -1,0 +1,25 @@
+; Minimal Godot project for the Variant-returning-global regression fixture
+; (gdstrict-ugw). Mirrors strict_project/project.godot: the GDScript warning
+; family is explicitly enabled so the analyzer emits unsafe_call_argument under
+; --check-only --debug even without gdstrict's injected override.cfg.
+
+config_version=5
+
+[application]
+
+config/name="gdstrict-strict-variant"
+config/features=PackedStringArray("4.6")
+
+[debug]
+
+gdscript/warnings/enable=true
+gdscript/warnings/untyped_declaration=1
+gdscript/warnings/inferred_declaration=1
+gdscript/warnings/unsafe_property_access=1
+gdscript/warnings/unsafe_method_access=1
+gdscript/warnings/unsafe_cast=1
+gdscript/warnings/unsafe_call_argument=1
+gdscript/warnings/return_value_discarded=1
+gdscript/warnings/unused_variable=1
+gdscript/warnings/shadowed_variable=1
+gdscript/warnings/integer_division=1

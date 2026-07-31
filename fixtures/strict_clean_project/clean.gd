@@ -14,8 +14,16 @@ func _ready() -> void:
 	var total: int = doubled + 1
 	# Float division, so no INTEGER_DIVISION.
 	var half: float = 5.0 / 2.0
+	# The typed `*f`/`*i` mirrors of the Variant-returning @GlobalScope math globals.
+	# These return concrete float/int, so feeding them to a typed parameter is safe —
+	# no UNSAFE_CALL_ARGUMENT. The Variant-returning bare forms (`round`, `abs`, ...)
+	# are the failing half, in ../strict_variant_project/variant_globals.gd.
+	var rounded: int = roundi(half)
+	var magnitude: float = absf(half)
+	var bounded: int = clampi(rounded, 0, 10)
+	var largest: float = maxf(magnitude, 1.0)
 	# Reading a statically-known property and using every value — nothing discarded.
-	print(node.name, total, half)
+	print(node.name, total, half, bounded, largest)
 
 
 func compute_value() -> int:

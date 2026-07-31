@@ -1084,6 +1084,98 @@ mod tests {
         );
     }
 
+    /// gdstrict-ugw acceptance: every call in the Variant-globals fixture must come
+    /// back classified as `UNSAFE_CALL_ARGUMENT` — one per line, none degraded to an
+    /// uncoded (and therefore unpromotable) warning. Godot's `abs`/`round`/`min` family
+    /// returns Variant, so feeding those results to a typed parameter is exactly the
+    /// diagnostic keystone's engine gate rejected while gdstrict reported clean.
+    /// Skipped when no Godot is available.
+    #[test]
+    fn live_variant_globals_are_unsafe_call_arguments() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        let project = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_variant_project"
+        ));
+        let diags = check_script(&godot, project, "variant_globals.gd").unwrap();
+
+        // Nothing in the fixture is a parse error — it is valid GDScript that Godot
+        // only rejects once warnings are errors.
+        assert!(
+            diags.iter().all(|d| d.severity == Severity::Warning),
+            "fixture must produce warnings, not parse errors: {diags:#?}"
+        );
+        // Every diagnostic the fixture provokes is this code; an unclassified one
+        // (code: None) is the regression.
+        let unclassified: Vec<_> = diags.iter().filter(|d| d.code.is_none()).collect();
+        assert!(
+            unclassified.is_empty(),
+            "unclassified diagnostics cannot be promoted by the severity preset: \
+             {unclassified:#?}"
+        );
+        let n = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::codes::UNSAFE_CALL_ARGUMENT))
+            .count();
+        assert_eq!(
+            n, VARIANT_GLOBAL_CALL_SITES,
+            "expected one UNSAFE_CALL_ARGUMENT per Variant-returning call site, \
+             got {n}: {diags:#?}"
+        );
+    }
+
+    /// The `@GlobalScope` math globals that return **Variant** in Godot 4.6.2, audited
+    /// by feeding each result to a typed parameter and watching for
+    /// `unsafe_call_argument` (see `docs/variant-returning-globals.md`). Each has a
+    /// typed `*f`/`*i` variant precisely because the bare form does not.
+    const VARIANT_RETURNING_GLOBALS: &[&str] = &[
+        "abs", "ceil", "clamp", "floor", "lerp", "max", "min", "round", "sign", "snapped", "wrap",
+    ];
+
+    /// Call sites in `fixtures/strict_variant_project/variant_globals.gd` that must each
+    /// yield one `UNSAFE_CALL_ARGUMENT`: one typed-arg feed per
+    /// [`VARIANT_RETURNING_GLOBALS`] entry, plus the `int(round(x))` constructor from the
+    /// downstream report.
+    const VARIANT_GLOBAL_CALL_SITES: usize = VARIANT_RETURNING_GLOBALS.len() + 1;
+
+    /// Drift guard for the count above: the fixture and the expectation must not
+    /// diverge silently. Counts `sink(` feeds plus the one `int(round(` line. No Godot
+    /// needed.
+    #[test]
+    fn variant_fixture_covers_every_audited_global() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_variant_project/variant_globals.gd"
+        ))
+        .unwrap();
+        // Code lines only — the fixture's prose mentions `int(round(x))` too, and a
+        // comment is not a call site.
+        let code_lines = || {
+            src.lines()
+                .map(str::trim_start)
+                .filter(|l| !l.starts_with('#'))
+        };
+        // `sink(` at the head of a statement is a call; `func sink(` is the definition.
+        let feeds = code_lines().filter(|l| l.starts_with("sink(")).count();
+        let ctor = code_lines().filter(|l| l.contains("int(round(")).count();
+        assert_eq!(
+            feeds + ctor,
+            VARIANT_GLOBAL_CALL_SITES,
+            "fixture call sites ({feeds} feeds + {ctor} ctor) drifted from \
+             VARIANT_GLOBAL_CALL_SITES"
+        );
+        // Each audited Variant-returning global must actually appear.
+        for g in VARIANT_RETURNING_GLOBALS {
+            assert!(
+                src.contains(&format!("sink({g}(")),
+                "fixture is missing a typed-arg feed of Variant-returning `{g}()`"
+            );
+        }
+    }
+
     /// Injection acceptance test: the fixture project's project.godot *actively
     /// disables* the unsafe/untyped family, yet gdstrict must still surface those
     /// warnings because it injects its own override.cfg. Proves we do not trust the

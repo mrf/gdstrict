@@ -161,6 +161,20 @@ fn classify_4x(msg: &str) -> Option<&'static str> {
         Some(codes::RETURN_VALUE_DISCARDED)
     } else if m.starts_with("Integer division") {
         Some(codes::INTEGER_DIVISION)
+    } else if m.contains("requires the subtype") && m.contains("was provided") {
+        // Godot 4.6.2, two shapes sharing this stem:
+        //   `The argument 1 of the function "sink()" requires the subtype "float"
+        //    but the supertype "Variant" was provided.`
+        //   `The argument 1 of the constructor "int()" requires the subtype "int",
+        //    "bool", or "float" but the supertype "Variant" was provided.`
+        // Keyed on the "requires the subtype … was provided" stem rather than the
+        // `The argument N of the …` prefix, so both the function and constructor
+        // forms — and any subtype alternation — land on one rule. This is the family
+        // Godot's Variant-returning @GlobalScope math globals (`round`, `abs`, `min`,
+        // … — see `fixtures/strict_variant_project`) trip when their result feeds a
+        // typed parameter; leaving it unclassified made those calls unpromotable and
+        // let `int(round(x))` pass gdstrict while failing the engine's own gate.
+        Some(codes::UNSAFE_CALL_ARGUMENT)
     } else if m.contains("inferred from a Variant value") {
         Some(codes::INFERRED_DECLARATION)
     } else if m.contains("is declared but never used in the block") {
@@ -405,6 +419,42 @@ mod tests {
         for (msg, want) in cases {
             assert_eq!(table.classify(msg), Some(want), "classifying: {msg}");
         }
+    }
+
+    /// gdstrict-ugw regression: `unsafe_call_argument` is injected into every check
+    /// (`STRICT_WARNINGS`) and promoted to an error by the strict preset — but an
+    /// unclassified message carries `code: None`, which the preset can never promote,
+    /// so the diagnostic silently degraded to a non-failing warning. These are the two
+    /// real Godot 4.6.2 templates, captured verbatim from the analyzer.
+    #[test]
+    fn classify_4x_maps_unsafe_call_argument() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        let cases = [
+            // Ordinary call (user function, builtin global, or builtin method — Godot
+            // says "function" for all three). From `sink(round(f))`.
+            r#"The argument 1 of the function "sink()" requires the subtype "float" but the supertype "Variant" was provided."#,
+            // Builtin-constructor call, which lists an alternation of accepted
+            // subtypes. From the downstream report's `int(round(x))`.
+            r#"The argument 1 of the constructor "int()" requires the subtype "int", "bool", or "float" but the supertype "Variant" was provided."#,
+        ];
+        for msg in cases {
+            assert_eq!(
+                table.classify(msg),
+                Some(codes::UNSAFE_CALL_ARGUMENT),
+                "classifying: {msg}"
+            );
+        }
+    }
+
+    /// The `unsafe_call_argument` rule keys on its own template, not on the bare word
+    /// "argument" — a message that merely mentions an argument must not be swept up.
+    #[test]
+    fn classify_4x_unsafe_call_argument_does_not_overmatch() {
+        let table = classifier_for(Some(GodotVersion::new(4, 6, 2)));
+        assert_eq!(
+            table.classify(r#"The argument "x" is never used in the function "helper"."#),
+            None
+        );
     }
 
     #[test]

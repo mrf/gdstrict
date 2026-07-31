@@ -166,7 +166,7 @@ mod tests {
             codes::UNSAFE_METHOD_ACCESS,
             codes::UNSAFE_PROPERTY_ACCESS,
             codes::UNSAFE_CAST,
-            "UNSAFE_CALL_ARGUMENT", // not yet classified, but the family rule still promotes it
+            codes::UNSAFE_CALL_ARGUMENT,
         ] {
             assert_eq!(cfg.action_for(code), Action::Error, "code {code}");
         }

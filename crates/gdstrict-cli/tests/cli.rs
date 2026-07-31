@@ -425,6 +425,44 @@ fn check_strict_flags_unsafe_fixture_with_exact_codes() {
     );
 }
 
+/// gdstrict-ugw regression, at the gate: `int(round(x))` and typed-arg feeds of the
+/// Variant-returning @GlobalScope math globals must **fail** `check`. This is the
+/// split-brain the downstream report hit — gdstrict said clean while Godot's own
+/// parser rejected the same line at warnings=2 — so the assertion that matters is the
+/// exit code, not just the presence of the code in the output.
+/// Skipped when no Godot is discoverable.
+#[test]
+fn check_strict_flags_variant_returning_globals() {
+    if gdstrict_strict::find_godot().is_none() {
+        eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/strict_variant_project/variant_globals.gd");
+    let out = Command::new(bin())
+        .args(["check"])
+        .arg(&fixture)
+        .output()
+        .expect("run gdstrict");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        code(&out),
+        1,
+        "int(round(x)) must fail the gate, not pass it; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("[strict:error] UNSAFE_CALL_ARGUMENT"),
+        "expected UNSAFE_CALL_ARGUMENT promoted to an error; stderr: {stderr}"
+    );
+    // The whole point is that it is an *error*, never a bare warning: an unclassified
+    // diagnostic still prints, but under `[strict:warning]` — and `check` exits 0.
+    // That is exactly what the downstream report saw.
+    assert!(
+        !stderr.contains("[strict:warning]"),
+        "every fixture diagnostic must be classified and promoted; stderr: {stderr}"
+    );
+}
+
 /// Phase 2 acceptance (PLAN.md §3): the clean, fully-typed fixture project →
 /// `check` exits 0. Every declaration is typed and every access statically safe,
 /// so gdstrict's injected strict warning set produces nothing. This is the
