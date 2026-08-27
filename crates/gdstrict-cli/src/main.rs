@@ -8,6 +8,7 @@
 //! (0 clean / 1 findings / 2 config error) documented in that module.
 
 mod check;
+mod complexity_cmd;
 mod config;
 mod diff;
 mod format;
@@ -42,6 +43,14 @@ enum Command {
     Check(CheckArgs),
     /// Run syntactic lint rules over GDScript (`.gd`) files (no Godot needed).
     Lint(LintArgs),
+
+    /// Report per-function cyclomatic complexity (no Godot needed).
+    ///
+    /// A report, not a gate: always exits 0 unless something failed to read.
+    /// Each record carries the function's line span, so a tool that owns coverage
+    /// can join on it and compute CRAP scores. The gate is the `max-complexity`
+    /// lint rule.
+    Complexity(ComplexityArgs),
 }
 
 #[derive(Args)]
@@ -106,12 +115,33 @@ struct LintArgs {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct ComplexityArgs {
+    /// Output format: `text` (one line per function) or `json` (array of records).
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: complexity_cmd::Format,
+
+    /// Only report functions with at least this complexity.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub min: usize,
+
+    /// Use this exact gdstrict.toml instead of discovering one per file.
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// Files or directories to report on (directories are walked recursively).
+    /// Defaults to the current directory when omitted.
+    #[arg(default_value = ".", value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Format(args) => run_format(&args),
         Command::Check(args) => check::run(&args),
         Command::Lint(args) => run_lint(&args),
+        Command::Complexity(args) => run_complexity(&args),
     }
 }
 
@@ -195,4 +225,15 @@ fn run_lint(args: &LintArgs) -> ExitCode {
         }
     };
     lint_cmd::run(&args.paths, &mut resolver)
+}
+
+fn run_complexity(args: &ComplexityArgs) -> ExitCode {
+    let mut resolver = match config::Resolver::new(args.config.as_deref(), None) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    complexity_cmd::run(args, &mut resolver)
 }

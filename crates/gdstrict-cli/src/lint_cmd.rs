@@ -6,9 +6,21 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use gdstrict_lint::Severity;
+use gdstrict_lint::{Rule, Severity};
 
-use crate::config::Resolver;
+use crate::config::{LintConfig, Resolver};
+
+/// The enabled rule set for `cfg`: the default catalog with any `[lint]`
+/// thresholds applied, minus the rules the config disables.
+///
+/// Shared with `check` so the two commands can never disagree about which rules
+/// run at which limits.
+pub fn rules_for(cfg: &LintConfig) -> Vec<Box<dyn Rule>> {
+    gdstrict_lint::rules::default_rules_with_limits(cfg.limits())
+        .into_iter()
+        .filter(|r| cfg.is_enabled(r.id()))
+        .collect()
+}
 
 /// Run the lint command over `paths` using `resolver` for config discovery.
 pub fn run(paths: &[PathBuf], resolver: &mut Resolver) -> ExitCode {
@@ -42,12 +54,7 @@ pub fn run(paths: &[PathBuf], resolver: &mut Resolver) -> ExitCode {
             }
         };
 
-        let rules: Vec<Box<dyn gdstrict_lint::Rule>> = gdstrict_lint::rules::default_rules()
-            .into_iter()
-            .filter(|r| lint_config.is_enabled(r.id()))
-            .collect();
-
-        let diags = gdstrict_lint::lint_with(&src, &rules);
+        let diags = gdstrict_lint::lint_with(&src, &rules_for(&lint_config));
         total_violations += diags.len();
 
         for d in &diags {

@@ -153,7 +153,18 @@ pub fn run(args: &CheckArgs) -> ExitCode {
         }
 
         // ── lint ────────────────────────────────────────────────────────────────
-        for d in gdstrict_lint::lint(&src) {
+        // Same resolved `[lint]` config the `lint` command uses (enables/disables
+        // *and* thresholds) — a project that raises `max-complexity` must not have
+        // the gate keep failing at the default.
+        let lint_config = match resolver.lint_config_for(path) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                eprintln!("error: {err}");
+                report.had_error = true;
+                continue;
+            }
+        };
+        for d in gdstrict_lint::lint_with(&src, &crate::lint_cmd::rules_for(&lint_config)) {
             report.violations += 1;
             if !args.quiet {
                 eprintln!(
