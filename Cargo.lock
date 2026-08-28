@@ -166,7 +166,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "gdstrict-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "gdstrict-format",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "gdstrict-format"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "gdstrict-syntax",
  "tree-sitter",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "gdstrict-lint"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "gdstrict-syntax",
  "tree-sitter",
@@ -197,11 +197,11 @@ dependencies = [
 
 [[package]]
 name = "gdstrict-strict"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "gdstrict-syntax"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-gdscript",
