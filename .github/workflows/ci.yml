@@ -77,3 +77,40 @@ jobs:
         # GODOT is set in GITHUB_ENV by the install-godot action; the strict
         # acceptance tests fail (not skip) if it is missing or misbehaves.
         run: cargo test --workspace
+
+  # Self-test of the composite action consumers use. The cargo suite never
+  # exercises action.yml, so its install path — the release installer, the
+  # separate pwsh branch for Windows, and the GITHUB_PATH wiring that makes
+  # `gdstrict` resolve in later steps — would otherwise only break in someone
+  # else's repo. Runs on all three OSes against a fixture that is known
+  # format- and lint-clean.
+  #
+  # NB: install-method 'prebuilt' installs the latest RELEASE, not this
+  # checkout. That is deliberate: this job verifies the action wiring, and the
+  # jobs above already cover the current source.
+  action:
+    name: action self-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the action (prebuilt install path)
+        id: gdstrict
+        uses: ./
+        with:
+          working-directory: fixtures/strict_clean_project
+      - name: Assert the version output is populated
+        shell: bash
+        run: |
+          set -euo pipefail
+          v='${{ steps.gdstrict.outputs.gdstrict-version }}'
+          echo "action reported version: $v"
+          # Guards the regression where the output was wired to a step that
+          # only ran under cargo-install, so prebuilt runs reported nothing.
+          case "$v" in
+            'gdstrict '*) ;;
+            *) echo "unexpected gdstrict-version output: '$v'" >&2; exit 1 ;;
+          esac
