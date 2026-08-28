@@ -1,6 +1,6 @@
 # gdstrict
 
-> Format, lint, and type-check your GDScript — in one fast binary, gated in CI.
+> Make "GDScript strict mode" a real thing your CI can enforce.
 
 [![CI](https://github.com/mrf/gdstrict/actions/workflows/ci.yml/badge.svg)](https://github.com/mrf/gdstrict/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -9,17 +9,17 @@
 gdstrict check .
 ```
 
-One command. Your code gets formatted consistently, your style rules get enforced, your untyped and unsafe declarations fail the build, and your gnarliest functions get flagged before they grow another branch.
+One command, and untyped variables, unsafe Variant access, and runaway functions stop reaching your main branch.
 
 ## What you get
 
-**A deterministic formatter that wraps long lines.** Point it at a file and it comes back canonical — long call chains, argument lists, and array/dictionary literals expanded to one element per line, with a magic trailing comma to force the expanded form. There is one knob, `line-length` (default 100, matching Godot's style guide). No style debates in code review. `format(format(x)) == format(x)` is a hard invariant, gated on every fixture in CI.
+**Strict typing that actually fails the build — checked by Godot itself.** gdstrict drives Godot's own `GDScriptAnalyzer` headlessly and turns its warnings into a pass/fail gate. `UNTYPED_DECLARATION`, `INFERRED_DECLARATION`, the whole `UNSAFE_*` family — each mapped to `error`, `warn`, or `off` in your config. No reimplemented type system to drift out of sync: the checking is exactly as accurate as the engine, because it *is* the engine. The engine won't fail your build over these. gdstrict will.
 
-**21 lint rules, no Godot required.** Naming conventions, dead code, redundant branches, class member ordering, size limits. Runs in milliseconds on a whole project — fast enough for a pre-commit hook or format-on-save.
+**Cyclomatic complexity, per function.** Nothing else in the GDScript ecosystem measures this. `gdstrict complexity` scores every function in your project, and the `max-complexity` lint rule turns the score into a gate — so the 40-branch `_physics_process` gets caught while it's still a 12-branch one. Counting follows ruff's `C901`, so the numbers mean the same thing they do in your Python and TypeScript repos, and the JSON output carries line spans for computing CRAP scores against your coverage data.
 
-**Real strict typing, because it's Godot doing the checking.** gdstrict drives Godot's own `GDScriptAnalyzer` headlessly and turns its warnings into a pass/fail gate. `UNTYPED_DECLARATION`, `INFERRED_DECLARATION`, the whole `UNSAFE_*` family — mapped to `error`, `warn`, or `off` per code in your config. The type checking is exactly as accurate as the engine, because it *is* the engine.
+**21 lint rules, no Godot required.** Naming conventions, dead code, redundant branches, Godot's canonical class member order, size limits. Runs in milliseconds across a whole project — fast enough for a pre-commit hook or format-on-save.
 
-**Cyclomatic complexity, per function.** Nothing else in the GDScript ecosystem measures this. `gdstrict complexity` reports the McCabe complexity of every function in your project, and the `max-complexity` lint rule turns it into a gate. Counting follows ruff's `C901`, so the numbers mean the same thing they do in your Python and TypeScript repos.
+**A formatter you never have to configure.** Deterministic and idempotent, with automatic wrapping of long call chains, argument lists, and array/dictionary literals. One knob, `line-length` (default 100, matching Godot's style guide). Adopt it and stop arguing about style in code review.
 
 ## Install
 

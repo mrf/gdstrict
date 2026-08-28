@@ -5,3 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Strict-mode checker: drive Godot headless and parse analyzer diagnostics"
+
+# `strict-bench` is an internal benchmarking tool, not a shipped artifact.
+# Without this, dist would publish it as a second release app alongside gdstrict.
+[package.metadata.dist]
+dist = false

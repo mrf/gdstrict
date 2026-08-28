@@ -73,7 +73,7 @@ runs:
           --git https://github.com/mrf/gdstrict \
           --rev "${{ inputs.version }}" \
           --locked \
-          gdstrict-cli
+          gdstrict
         echo "version=$(gdstrict --version 2>&1 || echo unknown)" >> "$GITHUB_OUTPUT"
 
     - name: Install Godot ${{ inputs.godot-version }} (headless, Linux only)
