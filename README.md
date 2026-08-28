@@ -231,8 +231,8 @@ That runs `format --check` and `lint` on the repo root. Add the strict-typing pa
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `main` | Git ref (branch, tag, SHA) of gdstrict to install |
-| `install-method` | `cargo-install` | Only `cargo-install` is supported today |
+| `version` | `latest` | Release tag to install (e.g. `v0.1.0`). Under `cargo-install`, a git ref instead |
+| `install-method` | `prebuilt` | `prebuilt` downloads a static release binary — no Rust toolchain. `cargo-install` builds from source, for arbitrary git refs |
 | `install-godot` | `false` | Install a headless Godot binary (Linux runners only). Required for `run-check` |
 | `godot-version` | `4.6.2` | Godot release to install |
 | `run-format-check` | `true` | Run `gdstrict format --check` |
@@ -249,9 +249,12 @@ repos:
   - repo: https://github.com/mrf/gdstrict
     rev: v0.1.0  # pin to a release tag
     hooks:
-      - id: gdstrict-format   # fast, no Godot needed — good for every project
+      - id: gdstrict-format   # no Godot needed — good for every project
+      - id: gdstrict-lint     # no Godot needed
       - id: gdstrict-check    # strict typing; needs Godot on PATH
 ```
+
+These download a prebuilt binary for your platform on first use, cache it, and run it — no Rust toolchain, no compile step. The tag comes from the `rev:` you pin, so the hook and the binary stay in lockstep.
 
 If Godot isn't on `PATH`, point the check hook at it:
 
@@ -261,7 +264,7 @@ If Godot isn't on `PATH`, point the check hook at it:
           GDSTRICT_GODOT: /path/to/godot
 ```
 
-Both hooks build from source via `cargo install` on first use, then reuse the cached binary.
+On a platform with no published binary, use the `-cargo` variants (`gdstrict-format-cargo`, `gdstrict-lint-cargo`, `gdstrict-check-cargo`), which build from source instead. `GDSTRICT_BIN` overrides everything and runs a binary you point it at.
 
 ## Editor integration
 
