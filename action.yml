@@ -7,17 +7,20 @@ description: >
 inputs:
   version:
     description: >
-      Git ref (branch, tag, or commit SHA) of gdstrict to install when
-      install-method is cargo-install.  Ignored when install-method is
-      prebuilt (not yet available).
+      Which gdstrict to install.  'latest' takes the newest release.  A
+      release tag such as 'v0.1.0' pins to that release.  Under
+      install-method 'cargo-install' this is a git ref instead (branch, tag,
+      or commit SHA), and 'latest' is treated as 'main'.
     required: false
-    default: 'main'
+    default: 'latest'
   install-method:
     description: >
-      How to install gdstrict.  Only 'cargo-install' is supported today
-      (prebuilt binaries are not yet shipped).
+      How to install gdstrict.  'prebuilt' (default) downloads a static
+      binary from the GitHub release — no Rust toolchain, a few seconds.
+      'cargo-install' builds from source, which is slower but can install an
+      arbitrary git ref.
     required: false
-    default: 'cargo-install'
+    default: 'prebuilt'
   install-godot:
     description: >
       Install a headless Godot binary so the check command can run the
@@ -55,26 +58,68 @@ inputs:
 outputs:
   gdstrict-version:
     description: 'The installed gdstrict version string.'
-    value: ${{ steps.install-gdstrict.outputs.version }}
+    value: ${{ steps.resolve-version.outputs.version }}
 
 runs:
   using: composite
   steps:
+    # --- prebuilt: download a static binary from the release (the fast path) ---
+
+    - name: Install gdstrict (prebuilt, Linux/macOS)
+      if: inputs.install-method == 'prebuilt' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ver='${{ inputs.version }}'
+        if [ "$ver" = 'latest' ] || [ "$ver" = 'main' ]; then
+          url='https://github.com/mrf/gdstrict/releases/latest/download/gdstrict-installer.sh'
+        else
+          url="https://github.com/mrf/gdstrict/releases/download/${ver}/gdstrict-installer.sh"
+        fi
+        curl --proto '=https' --tlsv1.2 -LsSf "$url" | sh
+        # The installer targets CARGO_HOME; make sure that bin dir is on PATH
+        # for the run steps below even when no Rust toolchain is present.
+        echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+    - name: Install gdstrict (prebuilt, Windows)
+      if: inputs.install-method == 'prebuilt' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $ver = '${{ inputs.version }}'
+        if ($ver -eq 'latest' -or $ver -eq 'main') {
+          $url = 'https://github.com/mrf/gdstrict/releases/latest/download/gdstrict-installer.ps1'
+        } else {
+          $url = "https://github.com/mrf/gdstrict/releases/download/$ver/gdstrict-installer.ps1"
+        }
+        irm $url | iex
+        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+        "$cargoHome\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+    # --- cargo-install: build from source (arbitrary git refs) ---
+
     - name: Install Rust toolchain (cargo-install method)
       if: inputs.install-method == 'cargo-install'
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Install gdstrict
-      id: install-gdstrict
+    - name: Install gdstrict (from source)
       if: inputs.install-method == 'cargo-install'
       shell: bash
       run: |
+        set -euo pipefail
+        ver='${{ inputs.version }}'
+        # 'latest' is a release concept; for a git-ref install it means main.
+        if [ "$ver" = 'latest' ]; then ver='main'; fi
         cargo install \
           --git https://github.com/mrf/gdstrict \
-          --rev "${{ inputs.version }}" \
+          --rev "$ver" \
           --locked \
           gdstrict
-        echo "version=$(gdstrict --version 2>&1 || echo unknown)" >> "$GITHUB_OUTPUT"
+
+    - name: Record installed version
+      id: resolve-version
+      shell: bash
+      run: echo "version=$(gdstrict --version 2>&1 || echo unknown)" >> "$GITHUB_OUTPUT"
 
     - name: Install Godot ${{ inputs.godot-version }} (headless, Linux only)
       if: inputs.install-godot == 'true'

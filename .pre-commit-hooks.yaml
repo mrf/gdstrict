@@ -1,10 +1,22 @@
+# Prebuilt hooks (recommended): download a static release binary, cache it,
+# and run it. No Rust toolchain, no compile on first use.
 - id: gdstrict-format
   name: gdstrict format (check)
   description: >-
     Checks that GDScript files are formatted with gdstrict. Exits non-zero if
     any staged file would be rewritten. Does not require Godot.
-  language: rust
-  entry: gdstrict format --check
+  language: script
+  entry: hooks/gdstrict-prebuilt.sh format --check
+  files: '\.gd$'
+  pass_filenames: true
+
+- id: gdstrict-lint
+  name: gdstrict lint
+  description: >-
+    Runs gdstrict's syntactic lint rules (naming conventions, dead code,
+    structure, max-complexity) on staged GDScript files. Does not require Godot.
+  language: script
+  entry: hooks/gdstrict-prebuilt.sh lint
   files: '\.gd$'
   pass_filenames: true
 
@@ -14,6 +26,39 @@
     Runs gdstrict's strict-mode type checker on staged GDScript files. Exits
     non-zero on any untyped or unsafe declaration. Requires a Godot binary on
     PATH (or pointed to by GDSTRICT_GODOT).
+  language: script
+  entry: hooks/gdstrict-prebuilt.sh check
+  files: '\.gd$'
+  pass_filenames: true
+
+# Source-built variants: compile gdstrict from this checkout via cargo. Slower
+# on first use, but works on platforms with no published binary and installs an
+# arbitrary `rev:` rather than a released tag.
+- id: gdstrict-format-cargo
+  name: gdstrict format (check, built from source)
+  description: >-
+    Same as gdstrict-format, but compiled from source with cargo instead of
+    downloading a release binary.
+  language: rust
+  entry: gdstrict format --check
+  files: '\.gd$'
+  pass_filenames: true
+
+- id: gdstrict-lint-cargo
+  name: gdstrict lint (built from source)
+  description: >-
+    Same as gdstrict-lint, but compiled from source with cargo instead of
+    downloading a release binary.
+  language: rust
+  entry: gdstrict lint
+  files: '\.gd$'
+  pass_filenames: true
+
+- id: gdstrict-check-cargo
+  name: gdstrict check (strict typing, built from source)
+  description: >-
+    Same as gdstrict-check, but compiled from source with cargo instead of
+    downloading a release binary.
   language: rust
   entry: gdstrict check
   files: '\.gd$'
