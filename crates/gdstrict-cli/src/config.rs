@@ -30,13 +30,16 @@
 //! [lint]
 //! function-name-case = false
 //! constant-name-case = false
+//! max-complexity = 15
 //!
 //! [warnings]
 //! INTEGER_DIVISION = "off"
 //! ```
 //!
 //! In the `[lint]` table, `false` disables a rule; `true` (or omitting the key)
-//! keeps it enabled. In `[warnings]`, each value is an action token. When no
+//! keeps it enabled; an integer sets a threshold rule's limit (`max-complexity`,
+//! `max-line-length`, `function-arguments-number`, `max-public-methods`) and
+//! implies enabled. In `[warnings]`, each value is an action token. When no
 //! `preset` key is given, severity defaults to the built-in `strict` preset — the
 //! strictest-by-default position `check` already took.
 
@@ -60,9 +63,10 @@ const CONFIG_FILENAME: &str = "gdstrict.toml";
 struct RawConfig {
     #[serde(rename = "line-length")]
     line_length: Option<usize>,
-    /// Per-rule enable/disable. `false` disables a rule; `true` or absent means enabled.
+    /// Per-rule settings: `false` disables a rule, `true` (or absent) enables it,
+    /// and an integer sets a threshold rule's limit. See [`LintSetting`].
     #[serde(default)]
-    lint: HashMap<String, bool>,
+    lint: HashMap<String, LintSetting>,
     /// Strict severity preset name (only `strict` is known). Absent ⇒ `strict`.
     preset: Option<String>,
     /// Per-code strict severity overrides; each value is `error` | `warn` | `off`.
@@ -70,15 +74,38 @@ struct RawConfig {
     warnings: HashMap<String, String>,
 }
 
+/// One value in the `[lint]` table. A rule is either switched on/off or — for the
+/// threshold rules (`max-complexity`, `max-line-length`, …) — given its limit,
+/// which implies enabled. Untagged, so both spellings live in one table:
+///
+/// ```toml
+/// [lint]
+/// max-complexity = 15        # threshold
+/// function-name-case = false # disabled
+/// ```
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LintSetting {
+    Enabled(bool),
+    Limit(usize),
+}
+
 /// Effective per-file lint settings resolved from config.
 #[derive(Clone, Default)]
 pub struct LintConfig {
     disabled: HashSet<String>,
+    limits: HashMap<String, usize>,
 }
 
 impl LintConfig {
     pub fn is_enabled(&self, rule_id: &str) -> bool {
         !self.disabled.contains(rule_id)
+    }
+
+    /// Threshold overrides keyed by rule id, in the shape
+    /// [`gdstrict_lint::rules::default_rules_with_limits`] consumes.
+    pub fn limits(&self) -> &HashMap<String, usize> {
+        &self.limits
     }
 }
 
@@ -198,15 +225,24 @@ fn load(path: &Path) -> Result<Resolved, String> {
         }
         None => DEFAULT_LINE_LENGTH,
     };
-    let disabled: HashSet<String> = raw
-        .lint
-        .into_iter()
-        .filter_map(|(k, enabled)| if !enabled { Some(k) } else { None })
-        .collect();
+    let mut disabled: HashSet<String> = HashSet::new();
+    let mut limits: HashMap<String, usize> = HashMap::new();
+    for (rule, setting) in raw.lint {
+        match setting {
+            LintSetting::Enabled(false) => {
+                disabled.insert(rule);
+            }
+            LintSetting::Enabled(true) => {}
+            LintSetting::Limit(n) => {
+                validate(n, &format!("[lint] {rule} in {}", path.display()))?;
+                limits.insert(rule, n);
+            }
+        }
+    }
     let severity = severity_from(raw.preset, raw.warnings, path)?;
     Ok(Resolved {
         line_length,
-        lint: LintConfig { disabled },
+        lint: LintConfig { disabled, limits },
         severity,
     })
 }
@@ -405,6 +441,78 @@ mod tests {
         let lc2 = r.lint_config_for(&dir.join("b.gd")).unwrap();
         assert!(!lc1.is_enabled("signal-name-case"));
         assert!(!lc2.is_enabled("signal-name-case"));
+    }
+
+    // ── lint thresholds ───────────────────────────────────────────────────────
+
+    #[test]
+    fn integer_lint_value_sets_a_threshold() {
+        let dir = scratch("lint-threshold");
+        fs::write(dir.join("gdstrict.toml"), "[lint]\nmax-complexity = 15\n").unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let lc = r.lint_config_for(&dir.join("a.gd")).unwrap();
+        assert_eq!(lc.limits().get("max-complexity").copied(), Some(15));
+        // A threshold implies the rule stays enabled.
+        assert!(lc.is_enabled("max-complexity"));
+    }
+
+    #[test]
+    fn bools_and_thresholds_coexist_in_one_table() {
+        let dir = scratch("lint-mixed");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "[lint]\nmax-complexity = 15\nfunction-name-case = false\nmax-line-length = 120\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let lc = r.lint_config_for(&dir.join("a.gd")).unwrap();
+        assert_eq!(lc.limits().get("max-complexity").copied(), Some(15));
+        assert_eq!(lc.limits().get("max-line-length").copied(), Some(120));
+        assert!(!lc.is_enabled("function-name-case"));
+    }
+
+    #[test]
+    fn disabled_rule_records_no_threshold() {
+        let dir = scratch("lint-threshold-off");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "[lint]\nmax-complexity = false\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        let lc = r.lint_config_for(&dir.join("a.gd")).unwrap();
+        assert!(!lc.is_enabled("max-complexity"));
+        assert!(lc.limits().is_empty());
+    }
+
+    #[test]
+    fn zero_threshold_is_rejected() {
+        // Same posture as `line-length = 0`: a limit of 0 is nonsense, so fail
+        // loudly rather than flag every function in the project.
+        let dir = scratch("lint-threshold-zero");
+        fs::write(dir.join("gdstrict.toml"), "[lint]\nmax-complexity = 0\n").unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        assert!(r.lint_config_for(&dir.join("a.gd")).is_err());
+    }
+
+    #[test]
+    fn non_bool_non_integer_lint_value_is_rejected() {
+        let dir = scratch("lint-bad-value");
+        fs::write(
+            dir.join("gdstrict.toml"),
+            "[lint]\nmax-complexity = \"15\"\n",
+        )
+        .unwrap();
+        let mut r = Resolver::new(None, None).unwrap();
+        assert!(r.lint_config_for(&dir.join("a.gd")).is_err());
+    }
+
+    #[test]
+    fn no_config_means_no_thresholds() {
+        let dir = scratch("lint-no-thresholds");
+        let mut r = Resolver::new(None, None).unwrap();
+        let lc = r.lint_config_for(&dir.join("a.gd")).unwrap();
+        assert!(lc.limits().is_empty());
     }
 
     // ── severity config ───────────────────────────────────────────────────────

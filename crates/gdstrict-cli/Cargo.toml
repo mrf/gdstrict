@@ -19,6 +19,8 @@ ignore = "0.4"
 # Config discovery: parse the single-knob gdstrict.toml (line-length).
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# `complexity --format json`: the machine-readable report CRAP tooling consumes.
+serde_json = "1"
 # The formatter engine. The CLI delegates all source-level formatting here via
 # `src/format.rs`, threading the resolved line length in as the target width.
 gdstrict-format = { path = "../gdstrict-format" }

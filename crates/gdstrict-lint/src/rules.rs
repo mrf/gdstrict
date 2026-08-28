@@ -3,13 +3,27 @@
 //! implementing [`Rule`] and is registered in [`default_rules`].
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use crate::complexity;
 use crate::{LintContext, Rule, Severity};
 use tree_sitter::Node;
 
-/// The default rule set applied by [`crate::lint`].
+/// The default rule set applied by [`crate::lint`], every threshold rule at its
+/// built-in limit.
 pub fn default_rules() -> Vec<Box<dyn Rule>> {
+    default_rules_with_limits(&HashMap::new())
+}
+
+/// The default rule set with the threshold rules' limits overridden by `limits`,
+/// keyed by rule id (`"max-complexity"`, `"max-line-length"`,
+/// `"function-arguments-number"`, `"max-public-methods"`). Ids with no entry —
+/// and every non-threshold rule — keep their built-in default.
+///
+/// This is the seam a config file uses to tune a limit without the lint crate
+/// having to know what a config file is.
+pub fn default_rules_with_limits(limits: &HashMap<String, usize>) -> Vec<Box<dyn Rule>> {
+    let limit = |id: &str, default: usize| limits.get(id).copied().unwrap_or(default);
     vec![
         Box::new(FunctionNameCase),
         Box::new(VariableNameCase),
@@ -28,9 +42,22 @@ pub fn default_rules() -> Vec<Box<dyn Rule>> {
         Box::new(DuplicatedLoad::default()),
         Box::new(ClassDefinitionsOrder),
         Box::new(PrivateMethodCall),
-        Box::new(MaxLineLength::default()),
-        Box::new(FunctionArgumentsNumber::default()),
-        Box::new(MaxPublicMethods::default()),
+        Box::new(MaxLineLength::new(limit(
+            "max-line-length",
+            MaxLineLength::DEFAULT_LIMIT,
+        ))),
+        Box::new(FunctionArgumentsNumber::new(limit(
+            "function-arguments-number",
+            FunctionArgumentsNumber::DEFAULT_LIMIT,
+        ))),
+        Box::new(MaxPublicMethods::new(limit(
+            "max-public-methods",
+            MaxPublicMethods::DEFAULT_LIMIT,
+        ))),
+        Box::new(MaxComplexity::new(limit(
+            "max-complexity",
+            MaxComplexity::DEFAULT_LIMIT,
+        ))),
     ]
 }
 
@@ -888,11 +915,16 @@ pub struct MaxLineLength {
 
 impl Default for MaxLineLength {
     fn default() -> Self {
-        Self { limit: 100 }
+        Self {
+            limit: Self::DEFAULT_LIMIT,
+        }
     }
 }
 
 impl MaxLineLength {
+    /// Limit applied when config says nothing (Godot's style-guide width).
+    pub const DEFAULT_LIMIT: usize = 100;
+
     /// Construct with an explicit character limit.
     #[must_use]
     pub fn new(limit: usize) -> Self {
@@ -947,11 +979,16 @@ pub struct FunctionArgumentsNumber {
 
 impl Default for FunctionArgumentsNumber {
     fn default() -> Self {
-        Self { limit: 10 }
+        Self {
+            limit: Self::DEFAULT_LIMIT,
+        }
     }
 }
 
 impl FunctionArgumentsNumber {
+    /// Limit applied when config says nothing.
+    pub const DEFAULT_LIMIT: usize = 10;
+
     /// Construct with an explicit parameter-count limit.
     #[must_use]
     pub fn new(limit: usize) -> Self {
@@ -1000,11 +1037,16 @@ pub struct MaxPublicMethods {
 
 impl Default for MaxPublicMethods {
     fn default() -> Self {
-        Self { limit: 20 }
+        Self {
+            limit: Self::DEFAULT_LIMIT,
+        }
     }
 }
 
 impl MaxPublicMethods {
+    /// Limit applied when config says nothing.
+    pub const DEFAULT_LIMIT: usize = 20;
+
     /// Construct with an explicit public-method limit.
     #[must_use]
     pub fn new(limit: usize) -> Self {
@@ -1035,6 +1077,69 @@ impl Rule for MaxPublicMethods {
                 format!("class has {count} public methods (max {limit})"),
             );
         }
+    }
+}
+
+/// `max-complexity`: a function whose McCabe cyclomatic complexity exceeds
+/// [`limit`](Self::limit). The GDScript analogue of ruff's `C901`, using the same
+/// statement-level counting model so the numbers are comparable — see
+/// [`crate::complexity`] for the exact `+1` set.
+///
+/// A high number means many independent paths, which is both hard to read and
+/// expensive to test: it is the `c` in a function's CRAP score
+/// (`c² × (1 − cov)³ + c`). `gdstrict complexity` reports the raw number for
+/// every function; this rule is the gate on top of it.
+///
+/// CST: `function_definition` / `constructor_definition`.
+pub struct MaxComplexity {
+    /// Maximum allowed cyclomatic complexity.
+    pub limit: usize,
+}
+
+impl Default for MaxComplexity {
+    fn default() -> Self {
+        Self {
+            limit: Self::DEFAULT_LIMIT,
+        }
+    }
+}
+
+impl MaxComplexity {
+    /// Limit applied when config says nothing. Matches ruff's
+    /// `lint.mccabe.max-complexity` default.
+    pub const DEFAULT_LIMIT: usize = 10;
+
+    /// Construct with an explicit complexity limit.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+}
+
+impl Rule for MaxComplexity {
+    fn id(&self) -> &'static str {
+        "max-complexity"
+    }
+
+    fn check(&self, node: Node, ctx: &mut LintContext) {
+        if !complexity::is_function(node) {
+            return;
+        }
+        let score = complexity::of_function(node);
+        if score <= self.limit {
+            return;
+        }
+        // Anchor on the function name when present; a top-level `_init` parses as
+        // a `constructor_definition` with no name field, so fall back to the node.
+        let anchor = node.child_by_field_name("name").unwrap_or(node);
+        let name = complexity::name_of(node, ctx.source());
+        let limit = self.limit;
+        ctx.report(
+            anchor,
+            self.id(),
+            Severity::Warning,
+            format!("`{name}` is too complex ({score} > {limit})"),
+        );
     }
 }
 
@@ -1896,5 +2001,98 @@ mod tests {
     #[test]
     fn max_public_methods_default_is_20() {
         assert_eq!(super::MaxPublicMethods::default().limit, 20);
+    }
+
+    // ── max-complexity ────────────────────────────────────────────────────────
+
+    /// `if` + `for` on top of the base 1 ⇒ complexity 3.
+    const COMPLEXITY_THREE: &str =
+        "func busy(x: int) -> void:\n\tif x:\n\t\tpass\n\tfor i in range(x):\n\t\tpass\n";
+
+    #[test]
+    fn flags_function_over_complexity_limit() {
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxComplexity::new(2))];
+        let diags = crate::lint_with(COMPLEXITY_THREE, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].rule, "max-complexity");
+        assert_eq!(diags[0].line, 1);
+        assert_eq!(diags[0].column, 5); // the name, not the `func` keyword
+        assert!(
+            diags[0].message.contains("`busy` is too complex (3 > 2)"),
+            "got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn accepts_function_at_complexity_limit() {
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxComplexity::new(3))];
+        let diags = crate::lint_with(COMPLEXITY_THREE, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn flags_complex_top_level_constructor() {
+        // `_init` at top level parses as `constructor_definition` (no name field):
+        // the rule must still fire and still name it.
+        let src = "func _init() -> void:\n\tif true:\n\t\tpass\n";
+        let rules: Vec<Box<dyn crate::Rule>> = vec![Box::new(super::MaxComplexity::new(1))];
+        let diags = crate::lint_with(src, &rules);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(
+            diags[0].message.contains("`_init` is too complex (2 > 1)"),
+            "got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn max_complexity_default_is_10() {
+        assert_eq!(super::MaxComplexity::default().limit, 10);
+    }
+
+    #[test]
+    fn default_rule_set_gates_complexity_at_ten() {
+        // Eleven `if`s ⇒ complexity 12, over the built-in default of 10.
+        let mut src = String::from("func busy(x: int) -> void:\n");
+        for _ in 0..11 {
+            src.push_str("\tif x:\n\t\tpass\n");
+        }
+        let diags = lint(&src);
+        assert_eq!(
+            diags.iter().filter(|d| d.rule == "max-complexity").count(),
+            1,
+            "got: {diags:#?}"
+        );
+    }
+
+    // ── threshold overrides ───────────────────────────────────────────────────
+
+    #[test]
+    fn limits_map_overrides_a_threshold_rule() {
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("max-complexity".to_string(), 2);
+        let rules = super::default_rules_with_limits(&limits);
+        let diags = crate::lint_with(COMPLEXITY_THREE, &rules);
+        assert_eq!(
+            diags.iter().filter(|d| d.rule == "max-complexity").count(),
+            1,
+            "got: {diags:#?}"
+        );
+    }
+
+    #[test]
+    fn limits_map_leaves_unlisted_rules_at_defaults() {
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("max-complexity".to_string(), 2);
+        let rules = super::default_rules_with_limits(&limits);
+        // 3 public methods is well under the untouched max-public-methods default.
+        let src = concat!(
+            "func a() -> void:\n\tpass\n",
+            "func b() -> void:\n\tpass\n",
+            "func c() -> void:\n\tpass\n",
+        );
+        let diags = crate::lint_with(src, &rules);
+        assert!(diags.is_empty(), "got: {diags:#?}");
     }
 }

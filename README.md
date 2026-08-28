@@ -40,7 +40,7 @@ gdstrict is built on a few firm opinions.
 |---|---|---|
 | Formatter (parse, document IR, width-aware wrapping) | `gdstrict-format` | Working. Exposed via `format`. |
 | Syntactic lint rules (naming conventions, dead code, structure) | `gdstrict-lint` | Working. Exposed via `lint`. |
-| CLI (`format`, `check`, `lint`, config discovery) | `gdstrict-cli` | Working. |
+| CLI (`format`, `check`, `lint`, `complexity`, config discovery) | `gdstrict-cli` | Working. |
 | Strict-mode driver (headless Godot, diagnostic extraction, warning-to-severity mapping) | `gdstrict-strict` | Working. Exposed via `check`. |
 
 ## Install
@@ -114,6 +114,40 @@ Runs the full naming-convention and code-quality rule set against the CST. No Go
 
 **Exit codes:** `0` — no findings. `1` — at least one finding or an error occurred.
 
+### `complexity` — per-function cyclomatic complexity (no Godot needed)
+
+```sh
+# One line per function: file:line:column: name complexity
+gdstrict complexity .
+
+# Machine-readable, for tooling.
+gdstrict complexity --format json src/
+
+# Only the functions worth looking at.
+gdstrict complexity --min 10 src/
+```
+
+Reports the McCabe cyclomatic complexity of every function. This is a **report, not a gate** — it exits 0 no matter how complex the code is. The gate is the [`max-complexity`](#structure) lint rule.
+
+Each JSON record carries the function's line span, which is what makes [CRAP scores](https://testing.googleblog.com/2011/02/this-code-is-crap.html) (`complexity² × (1 − coverage)³ + complexity`) computable: join `line`..`end_line` against your coverage report's line hits and do the arithmetic. gdstrict does not read coverage itself.
+
+```json
+[
+  {
+    "file": "src/player.gd",
+    "name": "_physics_process",
+    "line": 42,
+    "column": 0,
+    "end_line": 78,
+    "complexity": 13
+  }
+]
+```
+
+Counting follows ruff's `C901` / PyCQA `mccabe`, so numbers are comparable across languages: complexity starts at 1 and gains 1 for each `if`, `elif`, `for`, `while`, `match` arm, and nested lambda. An `else` adds nothing (it is the default path, not a decision), and neither do ternaries or `and` / `or` — the model is statement-level. A lambda's own branches count toward the function that contains it; methods of an inner `class Inner` are reported as `Inner.method`.
+
+**Exit codes:** `0` — report produced. `1` — a file or config could not be read.
+
 ### `check` — aggregate CI gate (format + lint + strict)
 
 ```sh
@@ -185,6 +219,11 @@ preset = "strict"
 function-name-case = false
 constant-name-case = false
 
+# The threshold rules take an integer instead, which sets their limit
+# (and keeps the rule enabled): max-complexity, max-line-length,
+# function-arguments-number, max-public-methods.
+max-complexity = 15
+
 [warnings]
 # Per-code severity overrides for the strict pass.
 # Valid values: "error" | "warn" | "off"
@@ -220,7 +259,7 @@ All other Godot warning codes default to **warn** under the `strict` preset (the
 
 ## Lint rules
 
-All rules are enabled by default and can be disabled individually via the `[lint]` config table.
+All rules are enabled by default and can be disabled individually via the `[lint]` config table, which also sets the threshold rules' limits.
 
 ### Naming conventions
 
@@ -256,6 +295,7 @@ All rules are enabled by default and can be disabled individually via the `[lint
 | `max-line-length` | 100 | Lines longer than `line-length` characters |
 | `function-arguments-number` | 10 | Functions with more parameters than the limit |
 | `max-public-methods` | 20 | Classes with more public methods than the limit |
+| `max-complexity` | 10 | Functions whose cyclomatic complexity exceeds the limit (ruff's `C901`; see [`complexity`](#complexity--per-function-cyclomatic-complexity-no-godot-needed)) |
 
 ## CI setup
 

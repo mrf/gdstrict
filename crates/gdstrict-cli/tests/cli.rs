@@ -689,3 +689,172 @@ fn lint_missing_path_is_an_error() {
         .expect("run gdstrict lint");
     assert_eq!(code(&out), 1);
 }
+
+// ── complexity ────────────────────────────────────────────────────────────────
+
+/// Two functions: `a` is straight-line (complexity 1), `b` has one `if` (2).
+const TWO_FUNCS: &str = concat!(
+    "func a() -> void:\n\tpass\n",
+    "\n",
+    "func b(x: int) -> void:\n\tif x > 0:\n\t\tx += 1\n",
+);
+
+/// A function whose complexity is 12 (base 1 + eleven `if`s) — over the built-in
+/// `max-complexity` default of 10.
+fn complex_source() -> String {
+    let mut src = String::from("func busy(x: int) -> void:\n");
+    for _ in 0..11 {
+        src.push_str("\tif x > 0:\n\t\tx += 1\n");
+    }
+    src
+}
+
+#[test]
+fn complexity_text_reports_every_function() {
+    let file = temp_file("complexity_text.gd", TWO_FUNCS);
+    let out = Command::new(bin())
+        .args(["complexity"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict complexity");
+    assert_eq!(code(&out), 0, "report is not a gate");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "got: {stdout}");
+    assert!(lines[0].ends_with(":1:0: a 1"), "got: {}", lines[0]);
+    assert!(lines[1].ends_with(":4:0: b 2"), "got: {}", lines[1]);
+}
+
+#[test]
+fn complexity_json_carries_span_and_score() {
+    let file = temp_file("complexity_json.gd", TWO_FUNCS);
+    let out = Command::new(bin())
+        .args(["complexity", "--format", "json"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict complexity --format json");
+    assert_eq!(code(&out), 0);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let records: serde_json::Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    let records = records.as_array().expect("top level is an array");
+    assert_eq!(records.len(), 2, "got: {stdout}");
+
+    // The span is the whole point: CRAP tooling joins coverage line hits on it.
+    assert_eq!(records[1]["name"], "b");
+    assert_eq!(records[1]["line"], 4);
+    assert_eq!(records[1]["column"], 0);
+    assert_eq!(records[1]["end_line"], 6);
+    assert_eq!(records[1]["complexity"], 2);
+    assert_eq!(
+        records[1]["file"],
+        serde_json::Value::String(file.display().to_string())
+    );
+}
+
+#[test]
+fn complexity_min_filters_simple_functions() {
+    let file = temp_file("complexity_min.gd", TWO_FUNCS);
+    let out = Command::new(bin())
+        .args(["complexity", "--min", "2"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict complexity --min");
+    assert_eq!(code(&out), 0);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(" b 2"), "got: {stdout}");
+    assert!(!stdout.contains(" a 1"), "got: {stdout}");
+}
+
+#[test]
+fn complexity_never_gates_on_complex_code() {
+    let file = temp_file("complexity_gate.gd", &complex_source());
+    let out = Command::new(bin())
+        .args(["complexity"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict complexity");
+    assert_eq!(code(&out), 0, "the report must never fail the build");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(" busy 12"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn complexity_missing_path_is_an_error() {
+    let out = Command::new(bin())
+        .args(["complexity", "/no/such/path/here.gd"])
+        .output()
+        .expect("run gdstrict complexity");
+    assert_eq!(code(&out), 1);
+}
+
+#[test]
+fn lint_flags_function_over_complexity_default() {
+    let file = temp_file("complexity_lint.gd", &complex_source());
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&file)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(code(&out), 1);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("max-complexity") && stderr.contains("`busy` is too complex (12 > 10)"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn lint_complexity_threshold_comes_from_config() {
+    let dir = scratch("lint-complexity-threshold");
+    write(&dir.join("gdstrict.toml"), "[lint]\nmax-complexity = 20\n");
+    write(&dir.join("busy.gd"), &complex_source());
+
+    let out = Command::new(bin())
+        .args(["lint"])
+        .arg(&dir)
+        .output()
+        .expect("run gdstrict lint");
+    assert_eq!(
+        code(&out),
+        0,
+        "a raised threshold should clear the finding; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn check_honors_the_configured_complexity_threshold() {
+    let dir = scratch("check-complexity-threshold");
+    write(&dir.join("busy.gd"), &complex_source());
+
+    let out = no_godot_cmd()
+        .args(["check", "--no-strict"])
+        .arg(&dir)
+        .output()
+        .expect("run gdstrict check --no-strict");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("max-complexity"),
+        "default threshold should fail the gate; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Same tree, threshold raised: `check` must honor `[lint]` like `lint` does.
+    write(&dir.join("gdstrict.toml"), "[lint]\nmax-complexity = 20\n");
+    let out = no_godot_cmd()
+        .args(["check", "--no-strict"])
+        .arg(&dir)
+        .output()
+        .expect("run gdstrict check --no-strict");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("max-complexity"),
+        "raised threshold should clear the finding; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

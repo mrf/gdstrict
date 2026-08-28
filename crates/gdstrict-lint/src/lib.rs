@@ -19,6 +19,7 @@
 
 use tree_sitter::Node;
 
+pub mod complexity;
 pub mod rules;
 
 /// How loud a finding is. Mirrors the severity split in `gdstrict-strict` so a CLI
