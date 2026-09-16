@@ -33,9 +33,21 @@ fn slice<'a>(src: &'a str, n: Node) -> &'a str {
     &src[n.start_byte()..n.end_byte()]
 }
 
+/// The named children of a node, *excluding* `line_continuation`.
+///
+/// tree-sitter-gdscript declares `line_continuation` (`\` + newline) as a grammar
+/// *extra*, so it can surface as a named child of any node — an `attribute` chain,
+/// an `arguments` list, a `return_statement`. It is pure whitespace to GDScript:
+/// the layout engine owns line breaking, so every lowering folds the continued
+/// lines into one logical line and the token must not be treated as an element.
+/// Leaving it in is exactly how `a \` / `.b()` became `a.\` / `.b()` (the
+/// `attribute` join emitted its `.` separator on both sides of the leaf) and
+/// `foo(a, \` / `b)` became `foo(a, \, b)`.
 fn named_children<'a>(n: Node<'a>) -> Vec<Node<'a>> {
     let mut c = n.walk();
-    n.named_children(&mut c).collect()
+    n.named_children(&mut c)
+        .filter(|ch| ch.kind() != "line_continuation")
+        .collect()
 }
 
 /// The anonymous (operator/keyword) tokens of a node, joined by spaces.
@@ -195,8 +207,9 @@ fn raw_elements<'a>(node: Node<'a>, src: &str) -> Vec<RawElement<Node<'a>>> {
 /// "magic trailing comma" as an author's request to keep the collection expanded.
 ///
 /// Scans the node's children (including the anonymous delimiter/comma tokens, which
-/// `named_children` omits) from the end: skip the closing delimiter, skip comments,
-/// then the next token decides — a `,` means a trailing comma, an element means none.
+/// `named_children` omits) from the end: skip the closing delimiter, skip comments
+/// and line continuations, then the next token decides — a `,` means a trailing
+/// comma, an element means none.
 fn has_magic_trailing_comma(n: Node) -> bool {
     let mut c = n.walk();
     let children: Vec<Node> = n.children(&mut c).collect();
@@ -204,7 +217,7 @@ fn has_magic_trailing_comma(n: Node) -> bool {
     iter.next(); // closing delimiter (last child)
     for ch in iter {
         match ch.kind() {
-            "comment" => continue,
+            "comment" | "line_continuation" => continue,
             "," => return true,
             _ => return false,
         }
