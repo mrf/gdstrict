@@ -340,6 +340,79 @@ func greet(name):
         );
     }
 
+    // --- comments inside bracketed collections (ks-xa1kd / gdstrict-yiw) ------
+    //
+    // A `(comment)` node between collection elements is trivia, not an element.
+    // Before the fix, `delimited` gave it a separator comma (`# a comment,`) and
+    // grew one more on every pass. Each case asserts the comment text survives
+    // byte-exact and the collection stays expanded; `check_roundtrip` covers
+    // re-parse + idempotency.
+
+    /// Assert `src` formats to itself (already canonical), re-parses, and is
+    /// idempotent — the comment text must not pick up a comma.
+    fn assert_canonical(src: &str) {
+        let out = check_roundtrip(src);
+        assert_eq!(out, src, "expected already-canonical input to be a no-op");
+    }
+
+    #[test]
+    fn comment_inside_dictionary_literal_gets_no_comma() {
+        assert_canonical(
+            "func f() -> void:\n\tvar d: Dictionary = {\n\t\t\"a\": 1,\n\t\t# a comment\n\t\t\"b\": 2,\n\t}\n\tprint(d)\n",
+        );
+    }
+
+    #[test]
+    fn comment_inside_typed_dictionary_and_as_last_item() {
+        assert_canonical(
+            "var t: Dictionary[String, int] = {\n\t\"x\": 1,\n\t# typed dict comment\n\t\"y\": 2,\n\t# last item comment\n}\n",
+        );
+    }
+
+    #[test]
+    fn comment_inside_for_iterable_array() {
+        assert_canonical(
+            "func f(a: int, b: int) -> void:\n\tfor pair: Array in [\n\t\t[\"a\", a],\n\t\t# a comment explaining the next entry\n\t\t[\"b\", b],\n\t]:\n\t\tprint(pair)\n",
+        );
+    }
+
+    #[test]
+    fn comment_inside_call_arguments() {
+        assert_canonical(
+            "func f() -> void:\n\tconfigure(\n\t\t# leading comment on the first argument\n\t\talpha,\n\t\tbeta,  # inline after beta\n\t)\n",
+        );
+    }
+
+    #[test]
+    fn doc_comments_inside_enum_body_stay_on_own_lines() {
+        // gdstrict-yiw: the enum body was flattened, so the first `##` swallowed
+        // the rest of the line (invalid GDScript) and every comment grew a comma.
+        assert_canonical(
+            "enum Kind {\n\t## The first kind.\n\tA,\n\t## The second kind.\n\tB,\n\t# last\n}\n",
+        );
+    }
+
+    #[test]
+    fn comment_inside_parameter_list() {
+        assert_canonical(
+            "func g(\n\t# the first parameter\n\ta: int,\n\tb: int,  # inline\n) -> void:\n\tprint(a, b)\n",
+        );
+    }
+
+    #[test]
+    fn comment_as_sole_collection_content_is_kept() {
+        assert_canonical("var e := [\n\t# nothing yet\n]\n");
+    }
+
+    #[test]
+    fn comment_forces_an_otherwise_flat_collection_to_expand() {
+        // No magic trailing comma in the input, and short enough to fit flat —
+        // but a `#` inside can never be flattened, so the comment forces expansion
+        // and the emitted trailing comma keeps it expanded on the next pass.
+        let out = check_roundtrip("var a := [\n\t1,\n\t# two\n\t2\n]\n");
+        assert_eq!(out, "var a := [\n\t1,\n\t# two\n\t2,\n]\n", "got:\n{out}");
+    }
+
     /// Every grammar fixture must format, re-parse clean, and be idempotent.
     #[test]
     fn all_grammar_fixtures_roundtrip() {

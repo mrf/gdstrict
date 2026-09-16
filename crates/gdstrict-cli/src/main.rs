@@ -185,7 +185,16 @@ fn run_format(args: &FormatArgs) -> ExitCode {
             }
         };
 
-        let formatted = format::format_source(&src, line_length);
+        // Never write, diff, or report output the formatter cannot reproduce from
+        // itself: a non-convergent pass is an internal error, not a reformat.
+        let formatted = match format::format_converged(&src, line_length) {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("error: {display}: {err}");
+                had_error = true;
+                continue;
+            }
+        };
         if formatted == src {
             continue;
         }

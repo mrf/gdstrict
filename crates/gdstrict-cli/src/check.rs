@@ -145,10 +145,20 @@ pub fn run(args: &CheckArgs) -> ExitCode {
                 continue;
             }
         };
-        if format::format_source(&src, line_length) != src {
-            report.violations += 1;
-            if !args.quiet {
-                eprintln!("{display}: would reformat (run `gdstrict format`)");
+        // A formatter that does not converge on this file is an internal bug, not
+        // a violation the user can fix by running `gdstrict format` — report it as
+        // an operational error (exit 2) rather than an eternal "would reformat".
+        match format::format_converged(&src, line_length) {
+            Ok(formatted) if formatted != src => {
+                report.violations += 1;
+                if !args.quiet {
+                    eprintln!("{display}: would reformat (run `gdstrict format`)");
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("error: {display}: {err}");
+                report.had_error = true;
             }
         }
 

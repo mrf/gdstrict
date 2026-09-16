@@ -3,9 +3,10 @@
 //! This is the bulk of the formatter. Every node kind is mapped to a [`Doc`]
 //! built from the existing primitives in [`crate::doc`] — `Group`, `Indent`,
 //! `Line`/`SoftLine`/`HardLine`, and `IfBreak`. Wrappable constructs (call
-//! argument lists, arrays, dictionaries, parameter lists, enum bodies) reuse the
-//! black-style [`delimited`] helper, which is the same shape as [`crate::doc::call`]:
-//! flat when it fits, one element per line with a magic trailing comma otherwise.
+//! argument lists, arrays, dictionaries, parameter lists, enum bodies) go through
+//! the black-style [`collection`] helper, which is the same shape as
+//! [`crate::doc::call`]: flat when it fits, one element per line with a magic
+//! trailing comma otherwise — and always expanded when a comment sits inside.
 //!
 //! Robustness contract: any node kind not given bespoke handling falls through to
 //! [`leaf`], which emits the node's exact source bytes. That guarantees every
@@ -55,36 +56,68 @@ fn field<'a>(n: Node<'a>, name: &str) -> Option<Node<'a>> {
 
 // --- black-style wrapping list (mirrors doc::call) -------------------------
 
-/// `open` items `close` with black wrapping: flat if it fits, else one item per
-/// line with a magic trailing comma. This is the general-purpose version of the
-/// Phase 0 [`crate::doc::call`] fixture (which stays as a fixed `&str`-based test
-/// case); real lowering goes through here. Keep the two in sync if the wrapping
-/// shape ever changes.
+/// Lower a bracketed, comma-separated collection node (`array`, `dictionary`,
+/// `arguments`, `parameters`, `enumerator_list`) with black wrapping: flat if it
+/// fits, else one element per line with a magic trailing comma.
 ///
-/// `force_break` implements Prettier's "magic trailing comma": when the *input*
-/// already had a trailing comma before `close` (see [`has_magic_trailing_comma`]),
-/// the caller passes `true` and the collection stays expanded — one item per line —
-/// regardless of whether it would otherwise fit flat. The expanded shape is
-/// byte-identical to the soft path's broken mode (same `open` / one-item-per-line /
-/// trailing comma / dedented `close`), so output stays idempotent: a re-parse sees
-/// the emitted trailing comma and force-breaks again to the same bytes.
-fn delimited(open: &str, items: Vec<Doc>, close: &str, force_break: bool) -> Doc {
+/// Comments are grammar `extras`, so a `(comment)` node can sit anywhere in the
+/// node's child list — between elements, after the last one, or alone. They are
+/// trivia, **not** elements: lowering them as list items gave each one a separator
+/// comma (`# a comment,`) and grew another on every pass (ks-xa1kd / gdstrict-yiw).
+/// The child list is instead run through [`crate::trivia::attach`] — the same
+/// leading / trailing / dangling classification `block` uses for statements — and
+/// each element is lowered with `lower_elem`.
+///
+/// Two conditions force the expanded shape ([`expanded`]):
+/// - `magic`: the *input* already had a trailing comma before `close` (Prettier's
+///   "magic trailing comma", see [`has_magic_trailing_comma`]);
+/// - any comment inside the collection: a `#` runs to end of line, so a flattened
+///   collection would swallow its own closing delimiter.
+///
+/// Both are stable under re-parse — the expanded shape emits a trailing comma and
+/// keeps every comment — so the output is a fixed point.
+fn collection(
+    open: &str,
+    n: Node,
+    close: &str,
+    src: &str,
+    lower_elem: impl Fn(Node, &str) -> Doc,
+    magic: bool,
+) -> Doc {
+    let items = attach(raw_elements(n, src));
     if items.is_empty() {
         return concat([text(open), text(close)]);
     }
-    if force_break {
-        // Build the broken form directly with `HardLine`s instead of a fits()-driven
-        // `Group`, so it always expands. The trailing comma is unconditional here
-        // (`text(",")`) rather than `trailing_comma()` since there is no flat mode.
-        let inner = interleave(items, Doc::HardLine, Doc::HardLine, text(","));
-        return concat([
-            text(open),
-            indent(concat(inner)),
-            Doc::HardLine,
-            text(close),
-        ]);
+    let has_comments = items
+        .iter()
+        .any(|it| it.stmt.is_none() || !it.leading.is_empty() || it.trailing.is_some());
+    if magic || has_comments {
+        return expanded(open, &items, close, src, lower_elem);
     }
-    let inner = interleave(items, Doc::SoftLine, Doc::Line, trailing_comma());
+    let docs: Vec<Doc> = items
+        .iter()
+        .filter_map(|it| it.stmt)
+        .map(|e| lower_elem(e, src))
+        .collect();
+    delimited(open, docs, close)
+}
+
+/// The soft shape of a collection: a fits()-driven `Group` that renders flat when
+/// it fits and one element per line (with a magic [`trailing_comma`]) otherwise.
+/// This is the general-purpose version of the Phase 0 [`crate::doc::call`] fixture
+/// (which stays as a fixed `&str`-based test case); keep the two in sync if the
+/// wrapping shape ever changes. Callers guarantee `items` is non-empty and
+/// comment-free — see [`collection`].
+fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+    let mut inner: Vec<Doc> = vec![Doc::SoftLine];
+    for (i, it) in items.into_iter().enumerate() {
+        if i > 0 {
+            inner.push(text(","));
+            inner.push(Doc::Line);
+        }
+        inner.push(it);
+    }
+    inner.push(trailing_comma());
     group(concat([
         text(open),
         indent(concat(inner)),
@@ -93,22 +126,67 @@ fn delimited(open: &str, items: Vec<Doc>, close: &str, force_break: bool) -> Doc
     ]))
 }
 
-/// Interleave wrappable list `items` into the inner doc sequence shared by both
-/// of [`delimited`]'s shapes: a `lead` break after the opener, a `,` + `sep` break
-/// between items, and a `term` after the last item (a real comma when force-broken,
-/// a magic [`trailing_comma`] in the soft path). Only the break/terminator
-/// primitives differ between the two shapes — the interleaving is identical.
-fn interleave(items: Vec<Doc>, lead: Doc, sep: Doc, term: Doc) -> Vec<Doc> {
-    let mut inner: Vec<Doc> = vec![lead];
-    for (i, it) in items.into_iter().enumerate() {
-        if i > 0 {
-            inner.push(text(","));
-            inner.push(sep.clone());
+/// The expanded shape of a collection, built directly from `HardLine`s (never a
+/// fits()-driven `Group`) so it always breaks. Byte-identical to [`delimited`]'s
+/// broken mode for a comment-free list — `open`, one element per line each ending
+/// in a real `,`, dedented `close` — with comments interleaved the way
+/// [`item_doc`] places them in a block: leading comments on their own lines above
+/// their element, a trailing comment after the element's comma (`x,  # note`), and
+/// a dangling group (no element after it) on its own lines before `close`.
+///
+/// Blank lines between elements are dropped, as they always have been for
+/// collections; only comments are preserved here.
+fn expanded(
+    open: &str,
+    items: &[Item<Node<'_>>],
+    close: &str,
+    src: &str,
+    lower_elem: impl Fn(Node, &str) -> Doc,
+) -> Doc {
+    let mut inner: Vec<Doc> = Vec::new();
+    for item in items {
+        for c in &item.leading {
+            inner.push(Doc::HardLine);
+            inner.push(text(c.text.clone()));
         }
-        inner.push(it);
+        if let Some(elem) = item.stmt {
+            inner.push(Doc::HardLine);
+            inner.push(lower_elem(elem, src));
+            inner.push(text(","));
+            if let Some(trailing) = &item.trailing {
+                inner.push(text(format!("  {}", trailing.text)));
+            }
+        }
     }
-    inner.push(term);
-    inner
+    concat([
+        text(open),
+        indent(concat(inner)),
+        Doc::HardLine,
+        text(close),
+    ])
+}
+
+/// The named children of `node` as row-annotated trivia elements for
+/// [`attach`]: each `(comment)` becomes [`Element::Comment`], anything else an
+/// [`Element::Stmt`] carrying the node. Shared by [`block`] (statements) and
+/// [`collection`] (list elements) — the classification is the same, only the
+/// payload's lowering differs.
+fn raw_elements<'a>(node: Node<'a>, src: &str) -> Vec<RawElement<Node<'a>>> {
+    named_children(node)
+        .into_iter()
+        .map(|kid| {
+            let element = if kid.kind() == "comment" {
+                Element::Comment(Comment::parse(slice(src, kid)))
+            } else {
+                Element::Stmt(kid)
+            };
+            RawElement {
+                element,
+                start_row: kid.start_position().row,
+                end_row: kid.end_position().row,
+            }
+        })
+        .collect()
 }
 
 /// Whether a collection node (`array`, `dictionary`, `arguments`) carries an
@@ -156,23 +234,7 @@ fn suite(header: Doc, body: Node, src: &str) -> Doc {
 /// comment is bound to the statement it belongs to — leading (own line above),
 /// trailing (inline, same row), or dangling (kept when no statement follows).
 fn block(node: Node, src: &str, leading: bool) -> Doc {
-    let raw: Vec<RawElement<Node>> = named_children(node)
-        .into_iter()
-        .map(|kid| {
-            let element = if kid.kind() == "comment" {
-                Element::Comment(Comment::parse(slice(src, kid)))
-            } else {
-                Element::Stmt(kid)
-            };
-            RawElement {
-                element,
-                start_row: kid.start_position().row,
-                end_row: kid.end_position().row,
-            }
-        })
-        .collect();
-
-    let items = attach(raw);
+    let items = attach(raw_elements(node, src));
     let mut parts: Vec<Doc> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         if i == 0 {
@@ -373,31 +435,13 @@ pub fn lower(n: Node, src: &str) -> Doc {
             Some(e) => concat([text("("), lower(*e, src), text(")")]),
             None => leaf(src, n),
         },
-        "array" => delimited(
-            "[",
-            named_children(n).iter().map(|c| lower(*c, src)).collect(),
-            "]",
-            has_magic_trailing_comma(n),
-        ),
-        "dictionary" => delimited(
-            "{",
-            named_children(n).iter().map(|c| lower(*c, src)).collect(),
-            "}",
-            has_magic_trailing_comma(n),
-        ),
+        "array" => collection("[", n, "]", src, lower, has_magic_trailing_comma(n)),
+        "dictionary" => collection("{", n, "}", src, lower, has_magic_trailing_comma(n)),
         "pair" => pair(n, src),
-        "arguments" => delimited(
-            "(",
-            named_children(n).iter().map(|c| lower(*c, src)).collect(),
-            ")",
-            has_magic_trailing_comma(n),
-        ),
-        "parameters" => delimited(
-            "(",
-            named_children(n).iter().map(|c| param(*c, src)).collect(),
-            ")",
-            false,
-        ),
+        "arguments" => collection("(", n, ")", src, lower, has_magic_trailing_comma(n)),
+        // Magic-trailing-comma is scoped to array/dict/call; parameter lists keep
+        // the fits()-driven behavior (but still expand for comments).
+        "parameters" => collection("(", n, ")", src, param, false),
 
         "call" => call_like(n, src),
         "attribute_call" => call_like(n, src),
@@ -666,13 +710,13 @@ fn enum_def(n: Node, src: &str) -> Doc {
         prefix.push(lower(name, src));
         prefix.push(text(" "));
     }
-    let items: Vec<Doc> = named_children(body)
-        .iter()
-        .map(|c| enumerator(*c, src))
-        .collect();
     // Scope magic-trailing-comma to array/dict/call (the issue's three cases); enum
-    // bodies keep the current fits()-driven behavior.
-    concat([concat(prefix), delimited("{", items, "}", false)])
+    // bodies keep the current fits()-driven behavior — except that `##` doc
+    // comments between enumerators force the body to expand (gdstrict-yiw).
+    concat([
+        concat(prefix),
+        collection("{", body, "}", src, enumerator, false),
+    ])
 }
 
 fn enumerator(n: Node, src: &str) -> Doc {
