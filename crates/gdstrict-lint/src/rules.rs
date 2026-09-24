@@ -758,10 +758,10 @@ fn name_is_private(node: Node, ctx: &LintContext) -> bool {
         .is_some_and(|n| ctx.node_text(n).starts_with('_'))
 }
 
-/// True if a `variable_statement` carries the annotation named `want`
-/// (`export`, `onready`, …). Annotations live in an `annotations` child whose
-/// `annotation` grandchildren each start with an `identifier` naming the macro.
-fn variable_has_annotation(var: Node, ctx: &LintContext, want: &str) -> bool {
+/// True if a `variable_statement` carries an annotation whose name satisfies
+/// `want`. Annotations live in an `annotations` child whose `annotation`
+/// grandchildren each start with an `identifier` naming the macro.
+fn variable_has_annotation(var: Node, ctx: &LintContext, want: impl Fn(&str) -> bool) -> bool {
     let mut cursor = var.walk();
     let has = var.named_children(&mut cursor).any(|child| {
         if child.kind() != "annotations" {
@@ -772,11 +772,19 @@ fn variable_has_annotation(var: Node, ctx: &LintContext, want: &str) -> bool {
             ann.kind() == "annotation"
                 && ann
                     .named_child(0)
-                    .is_some_and(|id| id.kind() == "identifier" && ctx.node_text(id) == want)
+                    .is_some_and(|id| id.kind() == "identifier" && want(ctx.node_text(id)))
         });
         found
     });
     has
+}
+
+/// True for `@export` and every exporting variant (`@export_range`,
+/// `@export_enum`, …). The grouping annotations share the prefix but export
+/// nothing, so a var under `@export_group` alone is not exported.
+fn is_export_annotation(name: &str) -> bool {
+    name.starts_with("export")
+        && !matches!(name, "export_group" | "export_subgroup" | "export_category")
 }
 
 /// The canonical rank of a top-level class member, plus a human label. Lower
@@ -797,9 +805,9 @@ fn member_rank(node: Node, ctx: &LintContext) -> Option<(u8, &'static str)> {
         "enum_definition" => Some((4, "enum")),
         "const_statement" => Some((5, "constant")),
         "variable_statement" => {
-            if variable_has_annotation(node, ctx, "export") {
+            if variable_has_annotation(node, ctx, is_export_annotation) {
                 Some((6, "exported variable"))
-            } else if variable_has_annotation(node, ctx, "onready") {
+            } else if variable_has_annotation(node, ctx, |name| name == "onready") {
                 Some((9, "onready variable"))
             } else if name_is_private(node, ctx) {
                 Some((8, "private variable"))
@@ -1826,6 +1834,42 @@ mod tests {
     #[test]
     fn flags_exported_var_after_plain_var() {
         let src = "var plain: int = 0\n@export var exported: int = 0\n";
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert!(diags[0].message.contains("exported"));
+    }
+
+    #[test]
+    fn accepts_plain_export_after_export_variants() {
+        // Every `@export_*` variant ranks as an exported variable, so a plain
+        // `@export` after one is still in order.
+        let src = concat!(
+            "@export_range(0, 10) var ranged: int = 0\n",
+            "@export_enum(\"A\", \"B\") var picked: int = 0\n",
+            "@export_flags(\"X\", \"Y\") var flags: int = 0\n",
+            "@export_file var path: String = \"\"\n",
+            "@export var plain_export: float = 0.0\n",
+            "var pub_var: int = 0\n",
+        );
+        let diags: Vec<_> = lint(src)
+            .into_iter()
+            .filter(|d| d.rule == "class-definitions-order")
+            .collect();
+        assert!(diags.is_empty(), "got: {diags:#?}");
+    }
+
+    #[test]
+    fn export_group_alone_does_not_make_a_var_exported() {
+        // `@export_group` is a grouping annotation, not an export: the plain var
+        // it precedes is still a public var and so still belongs after exports.
+        let src = concat!(
+            "@export_group(\"Motion\")\n",
+            "var plain: int = 0\n",
+            "@export var exported: int = 0\n",
+        );
         let diags: Vec<_> = lint(src)
             .into_iter()
             .filter(|d| d.rule == "class-definitions-order")
