@@ -296,15 +296,13 @@ pub fn check_script(
     let version = detect_version(godot);
 
     // Pass 1: errors (no --debug — safe).
-    let errs = run(godot, project_dir, script_rel, false)?;
-    let mut diags = parse_diagnostics(&errs, version);
+    let mut diags = run(godot, project_dir, script_rel, false, version)?;
     let has_error = diags.iter().any(|d| d.severity == Severity::Error);
 
     // Pass 2: warnings — only when there are no hard errors, to avoid the
     // --debug debugger crash.
     if !has_error {
-        let warns = run(godot, project_dir, script_rel, true)?;
-        diags.extend(parse_diagnostics(&warns, version));
+        diags.extend(run(godot, project_dir, script_rel, true, version)?);
     }
     Ok(diags)
 }
@@ -398,8 +396,7 @@ pub fn check_project_batch(
     let version = detect_version(godot);
 
     // Pass 1: errors over the whole corpus, no --debug (safe).
-    let err_stderr = run_harness(godot, project_dir, script_rels, false)?;
-    let mut diags = parse_diagnostics(&err_stderr, version);
+    let mut diags = run_harness(godot, project_dir, script_rels, false, version)?;
 
     // Files that produced a hard error must be excluded from the --debug pass, or the
     // debugger break would crash it. Errors carry the `res://` file they hit.
@@ -416,24 +413,24 @@ pub fn check_project_batch(
 
     // Pass 2: warnings over the error-free files, --debug (safe — nothing to break on).
     if !clean.is_empty() {
-        let warn_stderr = run_harness(godot, project_dir, &clean, true)?;
-        diags.extend(parse_diagnostics(&warn_stderr, version));
+        diags.extend(run_harness(godot, project_dir, &clean, true, version)?);
     }
     Ok(diags)
 }
 
 /// Run a generated batch harness over `script_rels` in one engine boot and return its
-/// stderr. The harness `load()`s each `res://<rel>` so the analyzer compiles (and, under
-/// `debug`, warns on) every file in a single process. The harness is written to a unique
-/// temp path and removed before returning — it lives outside the project tree, so it
-/// never pollutes the source corpus (Godot accepts an absolute `--script` alongside
+/// diagnostics. The harness `load()`s each `res://<rel>` so the analyzer compiles (and,
+/// under `debug`, warns on) every file in a single process. The harness is written to a
+/// unique temp path and removed before returning — it lives outside the project tree, so
+/// it never pollutes the source corpus (Godot accepts an absolute `--script` alongside
 /// `--path <project>`).
 fn run_harness(
     godot: &Path,
     project_dir: &Path,
     script_rels: &[String],
     debug: bool,
-) -> std::io::Result<String> {
+    version: Option<GodotVersion>,
+) -> std::io::Result<Vec<Diagnostic>> {
     let harness_path = unique_harness_path();
     std::fs::write(&harness_path, batch_harness_source(script_rels))?;
     // Remove the harness no matter how `run` returns.
@@ -448,14 +445,32 @@ fn run_harness(
     if debug {
         cmd.arg("--debug");
     }
-    capture_stderr(&mut cmd)
+    run_for_diagnostics(&mut cmd, version)
 }
 
-/// Run a built command and return its stderr as a lossy `String`. Godot writes all
-/// analyzer diagnostics to stderr, so every invocation path funnels through here.
-fn capture_stderr(cmd: &mut Command) -> std::io::Result<String> {
+/// Run a built command and parse its stderr into diagnostics. Godot writes all analyzer
+/// diagnostics to stderr, so every invocation path funnels through here.
+///
+/// A non-zero exit that parsed to **no** diagnostics is an operational failure, not a
+/// clean verdict: Godot's own aborts (`Invalid project path specified: "", aborting.`)
+/// carry no `ERROR:`/`WARNING:` prefix, so they parse to nothing and would otherwise
+/// read as a pass (ks-ev5ng). The error carries Godot's stderr so the cause is visible.
+fn run_for_diagnostics(
+    cmd: &mut Command,
+    version: Option<GodotVersion>,
+) -> std::io::Result<Vec<Diagnostic>> {
     let out = cmd.output()?;
-    Ok(String::from_utf8_lossy(&out.stderr).into_owned())
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let diags = parse_diagnostics(&stderr, version);
+    if !out.status.success() && diags.is_empty() {
+        let detail = stderr.trim();
+        return Err(std::io::Error::other(format!(
+            "godot exited with {} and reported no diagnostics{}{detail}",
+            out.status,
+            if detail.is_empty() { "" } else { ": " },
+        )));
+    }
+    Ok(diags)
 }
 
 /// RAII cleanup for the throwaway harness file: best-effort remove on drop.
@@ -556,7 +571,13 @@ where
         .collect()
 }
 
-fn run(godot: &Path, project_dir: &Path, script_rel: &str, debug: bool) -> std::io::Result<String> {
+fn run(
+    godot: &Path,
+    project_dir: &Path,
+    script_rel: &str,
+    debug: bool,
+    version: Option<GodotVersion>,
+) -> std::io::Result<Vec<Diagnostic>> {
     let mut cmd = Command::new(godot);
     cmd.arg("--headless")
         .arg("--check-only")
@@ -567,7 +588,7 @@ fn run(godot: &Path, project_dir: &Path, script_rel: &str, debug: bool) -> std::
     if debug {
         cmd.arg("--debug");
     }
-    capture_stderr(&mut cmd)
+    run_for_diagnostics(&mut cmd, version)
 }
 
 /// Parse Godot stderr into diagnostics. Pairs each `WARNING:` / `*ERROR:` header
@@ -958,6 +979,73 @@ mod tests {
         let project = PathBuf::from("/nonexistent/project");
         let out = check_project_batch(&godot, &project, &[]).unwrap();
         assert!(out.is_empty());
+    }
+
+    // --- operational failures must not read as "clean" (ks-ev5ng) ---
+
+    /// A scratch project dir plus a fake `godot` that prints `stderr_text` to stderr and
+    /// exits with `code`. Unix-only: the fake is a `/bin/sh` script.
+    #[cfg(unix)]
+    fn fake_godot_project(tag: &str, stderr_text: &str, code: i32) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir(tag);
+        let fake = dir.join("godot");
+        let body = format!("#!/bin/sh\ncat >&2 <<'EOF'\n{stderr_text}\nEOF\nexit {code}\n");
+        std::fs::write(&fake, body).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, fake)
+    }
+
+    /// Godot's "Invalid project path" abort has no `ERROR:`/`WARNING:` prefix, so it
+    /// parses to zero diagnostics. A non-zero exit with nothing parsed is an
+    /// operational failure, never a clean verdict.
+    #[cfg(unix)]
+    #[test]
+    fn check_script_nonzero_exit_without_diagnostics_is_error() {
+        let (dir, fake) = fake_godot_project(
+            "nonzero-nodiag",
+            "Invalid project path specified: \"\", aborting.",
+            255,
+        );
+        let err = check_script(&fake, &dir, "a.gd").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid project path"),
+            "error should carry godot's stderr, got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_project_batch_nonzero_exit_without_diagnostics_is_error() {
+        let (dir, fake) = fake_godot_project("batch-nonzero-nodiag", "boom", 1);
+        let err = check_project_batch(&fake, &dir, &["a.gd".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("boom"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Non-zero exit that DID report diagnostics is a normal "script has errors" run.
+    #[cfg(unix)]
+    #[test]
+    fn check_script_nonzero_exit_with_diagnostics_is_ok() {
+        let (dir, fake) = fake_godot_project(
+            "nonzero-diag",
+            "SCRIPT ERROR: Parse Error: nope\n          at: GDScript::reload (res://a.gd:3)",
+            1,
+        );
+        let diags = check_script(&fake, &dir, "a.gd").unwrap();
+        assert_eq!(diags.len(), 1, "got: {diags:#?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A clean run (exit 0, no output) stays clean.
+    #[cfg(unix)]
+    #[test]
+    fn check_script_zero_exit_without_diagnostics_is_clean() {
+        let (dir, fake) = fake_godot_project("zero-nodiag", "", 0);
+        assert!(check_script(&fake, &dir, "a.gd").unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // --- find_godot_in_dirs unit tests (no env-var mutation, thread-safe) ---

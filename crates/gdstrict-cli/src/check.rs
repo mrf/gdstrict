@@ -247,7 +247,7 @@ fn strict_job_for(
         return None;
     };
 
-    let Ok(script_rel) = path.strip_prefix(&project_dir) else {
+    let Some(script_rel) = relativize(path, &project_dir) else {
         // Should not happen — find_project_root returns an ancestor — but never panic.
         if !quiet {
             eprintln!("{display}: skipping strict (could not relativize against project root)");
@@ -258,7 +258,7 @@ fn strict_job_for(
     Some(StrictJob {
         display: display.to_string(),
         project_dir,
-        script_rel: script_rel.to_string_lossy().into_owned(),
+        script_rel,
         severity,
     })
 }
@@ -333,6 +333,16 @@ fn find_project_root(
     file: &Path,
     cache: &mut HashMap<PathBuf, Option<PathBuf>>,
 ) -> Option<PathBuf> {
+    find_project_root_with(file, cache, |d| d.join("project.godot").is_file())
+}
+
+/// [`find_project_root`] with the "is this directory a project root" probe injected, so
+/// the bare-relative cases can be tested without changing the process cwd.
+fn find_project_root_with(
+    file: &Path,
+    cache: &mut HashMap<PathBuf, Option<PathBuf>>,
+    is_root: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let start = file.parent().unwrap_or_else(|| Path::new("."));
     if let Some(hit) = cache.get(start) {
         return hit.clone();
@@ -340,7 +350,14 @@ fn find_project_root(
     let mut found = None;
     let mut dir = Some(start);
     while let Some(d) = dir {
-        if d.join("project.godot").is_file() {
+        // A bare-relative target's ancestors end in the empty path, which probes the cwd
+        // like `.` does but is not a usable `--path` ("Invalid project path ...").
+        let d = if d.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            d
+        };
+        if is_root(d) {
             found = Some(d.to_path_buf());
             break;
         }
@@ -348,6 +365,19 @@ fn find_project_root(
     }
     cache.insert(start.to_path_buf(), found.clone());
     found
+}
+
+/// `path` relative to `project_dir`, as Godot expects after `--path`.
+///
+/// A bare-relative `path` (`scripts/x.gd`) is already relative to the cwd root `.`, but
+/// `strip_prefix(".")` only matches an explicit `./` spelling, so that case is explicit.
+fn relativize(path: &Path, project_dir: &Path) -> Option<String> {
+    let rel = match path.strip_prefix(project_dir) {
+        Ok(rel) => rel,
+        Err(_) if project_dir == Path::new(".") && path.is_relative() => path,
+        Err(_) => return None,
+    };
+    Some(rel.to_string_lossy().into_owned())
 }
 
 fn print_summary(report: &Report) {
@@ -398,6 +428,42 @@ mod tests {
         assert_eq!(find_project_root(&file, &mut cache).as_deref(), Some(&*dir));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `scripts/x.gd` has the empty path as its grandparent, and `Path::new("")` joined
+    /// with `project.godot` resolves against the cwd — so the walk used to "find" the
+    /// root at `""`, which strict then passed to `godot --path ""` (ks-ev5ng). The
+    /// root must be `.`, and the script must relativize against it.
+    #[test]
+    fn find_project_root_bare_relative_target_is_dot_not_empty() {
+        // Emulates the filesystem: "" and "." both name the cwd, which holds the project.
+        let is_root = |d: &Path| d.as_os_str().is_empty() || d == Path::new(".");
+        let mut cache = HashMap::new();
+        let file = Path::new("scripts/x.gd");
+        let root = find_project_root_with(file, &mut cache, is_root).unwrap();
+        assert_eq!(root, Path::new("."));
+        assert_eq!(relativize(file, &root).as_deref(), Some("scripts/x.gd"));
+    }
+
+    #[test]
+    fn find_project_root_top_level_bare_file_is_dot() {
+        let is_root = |d: &Path| d.as_os_str().is_empty() || d == Path::new(".");
+        let mut cache = HashMap::new();
+        let root = find_project_root_with(Path::new("x.gd"), &mut cache, is_root).unwrap();
+        assert_eq!(root, Path::new("."));
+    }
+
+    #[test]
+    fn relativize_handles_dot_slash_and_absolute_roots() {
+        assert_eq!(
+            relativize(Path::new("./scripts/x.gd"), Path::new(".")).as_deref(),
+            Some("scripts/x.gd")
+        );
+        assert_eq!(
+            relativize(Path::new("/p/scripts/x.gd"), Path::new("/p")).as_deref(),
+            Some("scripts/x.gd")
+        );
+        assert_eq!(relativize(Path::new("/q/x.gd"), Path::new("/p")), None);
     }
 
     #[test]
