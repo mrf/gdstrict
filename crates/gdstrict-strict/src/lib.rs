@@ -3,14 +3,19 @@
 //!
 //! ## Strategy (Phase 0 spike .2 finding)
 //!
-//! Godot's `--check-only` surfaces *errors* but not *warnings*; adding `--debug`
+//! Compiling a script without `--debug` surfaces *errors* but not *warnings*; adding `--debug`
 //! surfaces warnings but drops into the debugger and **crashes (signal 11)** when a
 //! hard parse error is present. So we run two passes:
 //!
-//! 1. **Errors** — `godot --headless --check-only --path P --script F` (no `--debug`).
-//!    Emits `SCRIPT ERROR:` / `ERROR:` lines, exits 1. Never crashes.
-//! 2. **Warnings** — only if pass 1 is clean: `... --check-only --debug ...`.
+//! 1. **Errors** — `godot --headless --path P --script <harness>` (no `--debug`), where
+//!    the generated harness `load()`s each target. Emits `SCRIPT ERROR:` / `ERROR:`
+//!    lines. Never crashes.
+//! 2. **Warnings** — only for files clean in pass 1: the same run plus `--debug`.
 //!    Emits `WARNING:` lines. Safe because no hard error is present to trip the debugger.
+//!
+//! `--check-only --script F` is not used: it never registers the project's autoloads,
+//! so every autoload reference reads as `Identifier not found` (ks-ev5ng). See
+//! [`batch_harness_source`] for why the harness loads from `_initialize()`.
 //!
 //! Output format (Godot 4.6.2), two lines per diagnostic:
 //! ```text
@@ -282,29 +287,18 @@ impl Drop for StrictWarnings {
 /// gdstrict's required warning set is injected via an `override.cfg` for the duration
 /// of the check (see [`StrictWarnings`]), so unsafe/untyped warnings are emitted
 /// regardless of what the target `project.godot` enables or disables.
+///
+/// This is a one-file [`check_project_batch`], not `--check-only --script <rel>`:
+/// check-only mode never registers the project's autoloads, so every reference to one
+/// (`EventBus.emit…`) was a hard `Identifier not found` error that also suppressed the
+/// file's warning pass (ks-ev5ng). The batch harness loads the file after Godot has
+/// registered them.
 pub fn check_script(
     godot: &Path,
     project_dir: &Path,
     script_rel: &str,
 ) -> std::io::Result<Vec<Diagnostic>> {
-    // Force our warning settings on for both passes; restored when `_warnings` drops
-    // (including on the `?` early returns below).
-    let _warnings = StrictWarnings::install(project_dir)?;
-
-    // Detect the binary's version once (cached per path) so the message classifier
-    // uses the table that matches this Godot. `None` falls back to the newest table.
-    let version = detect_version(godot);
-
-    // Pass 1: errors (no --debug — safe).
-    let mut diags = run(godot, project_dir, script_rel, false, version)?;
-    let has_error = diags.iter().any(|d| d.severity == Severity::Error);
-
-    // Pass 2: warnings — only when there are no hard errors, to avoid the
-    // --debug debugger crash.
-    if !has_error {
-        diags.extend(run(godot, project_dir, script_rel, true, version)?);
-    }
-    Ok(diags)
+    check_project_batch(godot, project_dir, &[script_rel.to_string()])
 }
 
 /// Default size of the strict worker pool: `max(1, cpu - 2)`.
@@ -347,6 +341,116 @@ pub fn check_scripts(
     // payload survives in `parallel_map`'s `thread::Result` for anyone who wants it.
     .map(|r| r.unwrap_or_else(|_| Err(std::io::Error::other("strict check panicked"))))
     .collect()
+}
+
+/// Same contract as [`check_scripts`] — one result per job, **in input order** — but
+/// each Godot boot checks a whole chunk of a project's files through
+/// [`check_project_batch`] instead of one file.
+///
+/// Every boot pays for the project's autoloads (and everything they depend on), which
+/// per-file mode would pay once per file per pass: on keystone that is ~2.7 s a boot,
+/// so a 1,600-file tree would spend most of its time re-booting (ks-ev5ng). Each
+/// project's jobs are split into at most [`default_worker_count`] contiguous chunks,
+/// and the chunks run on the bounded pool, so boots are amortized and the cores stay
+/// busy.
+///
+/// Diagnostics are handed back to the job whose file they were reported against (see
+/// [`attribute_diagnostics`]). A diagnostic about a file outside the chunk — a
+/// dependency compiled on the way — is not this chunk's to report: if it is a target it
+/// is reported by its own chunk, and a broken dependency already fails each dependent
+/// with an error attributed to the dependent itself.
+///
+/// **Crash isolation is per chunk:** a crashed or failed boot turns into an `io::Error`
+/// for every job in that chunk and no other.
+pub fn check_scripts_batched(
+    godot: &Path,
+    jobs: &[(PathBuf, String)],
+) -> Vec<std::io::Result<Vec<Diagnostic>>> {
+    let workers = default_worker_count();
+    let chunks = batch_chunks(jobs, workers);
+    let outcomes = parallel_map(chunks.len(), workers, |c| {
+        let chunk = &chunks[c];
+        let project_dir = &jobs[chunk[0]].0;
+        let rels: Vec<String> = chunk.iter().map(|&i| jobs[i].1.clone()).collect();
+        check_project_batch(godot, project_dir, &rels).map(|d| attribute_diagnostics(&rels, d))
+    });
+
+    let mut results: Vec<Option<std::io::Result<Vec<Diagnostic>>>> =
+        (0..jobs.len()).map(|_| None).collect();
+    for (chunk, outcome) in chunks.iter().zip(outcomes) {
+        match outcome {
+            Ok(Ok(per_job)) => {
+                for (&i, diags) in chunk.iter().zip(per_job) {
+                    results[i] = Some(Ok(diags));
+                }
+            }
+            Ok(Err(err)) => {
+                let msg = err.to_string();
+                for &i in chunk {
+                    results[i] = Some(Err(std::io::Error::new(err.kind(), msg.clone())));
+                }
+            }
+            Err(_) => {
+                for &i in chunk {
+                    results[i] = Some(Err(std::io::Error::other("strict check panicked")));
+                }
+            }
+        }
+    }
+    results
+        .into_iter()
+        .map(|r| r.expect("batch_chunks assigns every job to exactly one chunk"))
+        .collect()
+}
+
+/// Partition job indices into batch chunks: grouped by project (first-appearance
+/// order), each project split into at most `workers` contiguous, near-equal chunks.
+/// Every index lands in exactly one non-empty chunk.
+fn batch_chunks(jobs: &[(PathBuf, String)], workers: usize) -> Vec<Vec<usize>> {
+    let mut projects: Vec<(&Path, Vec<usize>)> = Vec::new();
+    for (i, (dir, _)) in jobs.iter().enumerate() {
+        match projects.iter_mut().find(|(d, _)| *d == dir.as_path()) {
+            Some((_, idx)) => idx.push(i),
+            None => projects.push((dir.as_path(), vec![i])),
+        }
+    }
+    let mut chunks = Vec::new();
+    for (_, idx) in projects {
+        let size = idx.len().div_ceil(workers.max(1));
+        chunks.extend(idx.chunks(size).map(<[usize]>::to_vec));
+    }
+    chunks
+}
+
+/// Split one batch's diagnostics back out per file: `result[k]` holds the diagnostics
+/// for `rels[k]`. A diagnostic belongs to the file its locator names; failing that, to
+/// the file its message quotes (Godot's `Failed to load script "res://x.gd"` companion
+/// line is located in the engine's own source, not the script). Anything else concerns
+/// a file outside this batch and is dropped — see [`check_scripts_batched`].
+fn attribute_diagnostics(rels: &[String], diags: Vec<Diagnostic>) -> Vec<Vec<Diagnostic>> {
+    let mut slot: HashMap<String, Vec<usize>> = HashMap::new();
+    for (k, rel) in rels.iter().enumerate() {
+        slot.entry(format!("res://{rel}")).or_default().push(k);
+    }
+    let mut out: Vec<Vec<Diagnostic>> = vec![Vec::new(); rels.len()];
+    for d in diags {
+        let owners = slot
+            .get(&d.file)
+            .or_else(|| quoted_res_path(&d.message).and_then(|p| slot.get(p)));
+        if let Some(owners) = owners {
+            for &k in owners {
+                out[k].push(d.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The first `"res://…"` literal quoted in `message`, without its quotes.
+fn quoted_res_path(message: &str) -> Option<&str> {
+    let start = message.find("\"res://")? + 1;
+    let len = message[start..].find('"')?;
+    Some(&message[start..start + len])
 }
 
 /// Check **every** script in a project with a single engine boot per pass via a
@@ -495,12 +599,18 @@ fn unique_harness_path() -> PathBuf {
 /// Generate the fully-typed `SceneTree` harness that `load()`s each script. It is typed
 /// to the hilt on purpose: an untyped harness would itself trip `UNTYPED_DECLARATION`
 /// and pollute the diagnostics with warnings about the harness instead of the corpus.
+///
+/// The loads run in `_initialize()`, never `_init()` (ks-ev5ng). Godot calls a
+/// `--script` main loop's `_init` when it attaches the script, before it registers the
+/// project's autoload globals; anything compiled there sees `EventBus` as an unknown
+/// identifier. `_initialize()` runs once the main loop starts, after registration.
+/// (Autoload nodes are instantiated in both cases, so this adds no side effects.)
 fn batch_harness_source(script_rels: &[String]) -> String {
     let mut s = String::from(
         "# Generated by gdstrict (check_project_batch). Loads every project script in\n\
          # one engine boot so the analyzer compiles/warns on all of them at once.\n\
          extends SceneTree\n\n\
-         func _init() -> void:\n\
+         func _initialize() -> void:\n\
          \tvar files: PackedStringArray = PackedStringArray([\n",
     );
     for rel in script_rels {
@@ -569,26 +679,6 @@ where
                 .expect("every slot is filled before the scope joins")
         })
         .collect()
-}
-
-fn run(
-    godot: &Path,
-    project_dir: &Path,
-    script_rel: &str,
-    debug: bool,
-    version: Option<GodotVersion>,
-) -> std::io::Result<Vec<Diagnostic>> {
-    let mut cmd = Command::new(godot);
-    cmd.arg("--headless")
-        .arg("--check-only")
-        .arg("--path")
-        .arg(project_dir)
-        .arg("--script")
-        .arg(script_rel);
-    if debug {
-        cmd.arg("--debug");
-    }
-    run_for_diagnostics(&mut cmd, version)
 }
 
 /// Parse Godot stderr into diagnostics. Pairs each `WARNING:` / `*ERROR:` header
@@ -920,6 +1010,15 @@ mod tests {
         // Every script is referenced as a res:// literal.
         assert!(src.contains("\"res://core/foo.gd\""));
         assert!(src.contains("\"res://ui/bar.gd\""));
+    }
+
+    /// The loads must run in `_initialize()`: `_init()` runs before Godot registers
+    /// autoload globals, so every autoload reference fails to compile (ks-ev5ng).
+    #[test]
+    fn batch_harness_loads_after_autoload_registration() {
+        let src = batch_harness_source(&["a.gd".to_string()]);
+        assert!(src.contains("func _initialize() -> void:"), "got:\n{src}");
+        assert!(!src.contains("func _init("), "got:\n{src}");
     }
 
     /// Paths with quotes/backslashes must be escaped so the harness stays valid GDScript.
@@ -1264,6 +1363,62 @@ mod tests {
         }
     }
 
+    // --- autoload registration (ks-ev5ng bug 2) ---
+
+    fn autoload_fixture() -> &'static Path {
+        Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/strict_autoload_project"
+        ))
+    }
+
+    /// Shared assertion: the autoload resolved (no hard error at all) and the warning
+    /// pass ran on the file that reads it.
+    fn assert_autoload_resolved(diags: &[Diagnostic]) {
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "autoload `Bus` must resolve, got errors: {errors:#?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.file == "res://user.gd"
+                    && d.code == Some(crate::codes::UNTYPED_DECLARATION)),
+            "warning pass must run on the autoload-reading script: {diags:#?}"
+        );
+    }
+
+    /// Per-file mode: `--check-only` never registers autoloads, so the checked
+    /// script's `Bus.hits` was a hard `Identifier not found` error. Skipped when no
+    /// Godot is available.
+    #[test]
+    fn live_check_script_resolves_autoloads() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        let diags = check_script(&godot, autoload_fixture(), "user.gd").unwrap();
+        assert_autoload_resolved(&diags);
+    }
+
+    /// Batch mode: the harness `load()`ed from `_init`, which Godot runs at
+    /// `set_script` time — before it registers the autoload globals. Skipped when no
+    /// Godot is available.
+    #[test]
+    fn live_batch_resolves_autoloads() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        let diags =
+            check_project_batch(&godot, autoload_fixture(), &["user.gd".to_string()]).unwrap();
+        assert_autoload_resolved(&diags);
+    }
+
     /// Injection acceptance test: the fixture project's project.godot *actively
     /// disables* the unsafe/untyped family, yet gdstrict must still surface those
     /// warnings because it injects its own override.cfg. Proves we do not trust the
@@ -1427,6 +1582,161 @@ mod tests {
         assert!(
             peak >= 2,
             "pool never ran two jobs at once (peak {peak}); not actually concurrent"
+        );
+    }
+
+    // --- chunked batches (check_scripts_batched) ---
+
+    fn jobs_of(spec: &[(&str, &str)]) -> Vec<(PathBuf, String)> {
+        spec.iter()
+            .map(|(p, r)| (PathBuf::from(p), (*r).to_string()))
+            .collect()
+    }
+
+    /// Chunks never mix projects, never exceed `workers` per project, keep each
+    /// project's files contiguous, and cover every job exactly once.
+    #[test]
+    fn batch_chunks_partition_per_project() {
+        let jobs = jobs_of(&[
+            ("/a", "1.gd"),
+            ("/b", "1.gd"),
+            ("/a", "2.gd"),
+            ("/a", "3.gd"),
+            ("/a", "4.gd"),
+            ("/a", "5.gd"),
+        ]);
+        let chunks = batch_chunks(&jobs, 2);
+        assert_eq!(chunks, vec![vec![0, 2, 3], vec![4, 5], vec![1]]);
+
+        // More workers than files: one file per chunk, never an empty chunk.
+        let chunks = batch_chunks(&jobs_of(&[("/a", "1.gd"), ("/a", "2.gd")]), 8);
+        assert_eq!(chunks, vec![vec![0], vec![1]]);
+        assert!(batch_chunks(&[], 4).is_empty());
+    }
+
+    fn diag(severity: Severity, file: &str, message: &str) -> Diagnostic {
+        Diagnostic {
+            severity,
+            file: file.to_string(),
+            line: 1,
+            code: None,
+            message: message.to_string(),
+        }
+    }
+
+    /// A diagnostic goes to the file its locator names, else the file its message
+    /// quotes (the engine-located `Failed to load script` companion), else nowhere.
+    #[test]
+    fn attribute_diagnostics_by_locator_then_quoted_path() {
+        let rels = vec!["a.gd".to_string(), "b.gd".to_string()];
+        let per = attribute_diagnostics(
+            &rels,
+            vec![
+                diag(Severity::Warning, "res://b.gd", "untyped"),
+                diag(Severity::Error, "res://a.gd", "Parse Error: nope"),
+                diag(
+                    Severity::Error,
+                    "modules/gdscript/gdscript.cpp",
+                    "Failed to load script \"res://a.gd\" with error \"Parse error\".",
+                ),
+                diag(Severity::Warning, "res://dep.gd", "not a target"),
+            ],
+        );
+        let msgs = |k: usize| per[k].iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        assert_eq!(msgs(0).len(), 2, "a.gd: {:?}", msgs(0));
+        assert!(msgs(0)[1].starts_with("Failed to load script"));
+        assert_eq!(msgs(1), vec!["untyped".to_string()]);
+    }
+
+    #[test]
+    fn quoted_res_path_extracts_first_literal() {
+        assert_eq!(
+            quoted_res_path("Failed to load script \"res://x/y.gd\" with error \"E\"."),
+            Some("res://x/y.gd")
+        );
+        assert_eq!(quoted_res_path("no path here"), None);
+        assert_eq!(quoted_res_path("unterminated \"res://x.gd"), None);
+    }
+
+    /// A failed boot fails every job in its chunk — never reads as clean.
+    #[cfg(unix)]
+    #[test]
+    fn batched_failed_boot_errors_its_jobs() {
+        let (dir, fake) = fake_godot_project("batched-nonzero", "boom", 1);
+        let jobs: Vec<(PathBuf, String)> = ["a.gd", "b.gd"]
+            .iter()
+            .map(|r| (dir.clone(), (*r).to_string()))
+            .collect();
+        let results = check_scripts_batched(&fake, &jobs);
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            let err = r.as_ref().unwrap_err();
+            assert!(err.to_string().contains("boom"), "got: {err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Live parity: over the acceptance corpus plus the warning fixture, the chunked
+    /// pool reports each file exactly what the per-file pool reports against that file.
+    /// Skipped when no Godot is available.
+    #[test]
+    fn live_batched_matches_per_file() {
+        let Some(godot) = runnable_godot() else {
+            eprintln!("no runnable godot; skipping");
+            return;
+        };
+        // A private copy of the acceptance corpus: `check_scripts_runs_corpus_concurrently`
+        // asserts no override.cfg survives its run, and this test's guards on the shared
+        // fixture would race that assertion.
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/acceptance"
+        ));
+        let acceptance = scratch_dir("batched-parity");
+        std::fs::create_dir_all(acceptance.join("stagehand_core")).unwrap();
+        std::fs::copy(
+            fixture.join("project.godot"),
+            acceptance.join("project.godot"),
+        )
+        .unwrap();
+        let mut jobs: Vec<(PathBuf, String)> = Vec::new();
+        for e in std::fs::read_dir(fixture.join("stagehand_core")).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            if name.ends_with(".gd") {
+                let rel = format!("stagehand_core/{name}");
+                std::fs::copy(fixture.join(&rel), acceptance.join(&rel)).unwrap();
+                jobs.push((acceptance.clone(), rel));
+            }
+        }
+        jobs.sort();
+        jobs.push((autoload_fixture().to_path_buf(), "user.gd".to_string()));
+
+        let batched = check_scripts_batched(&godot, &jobs);
+        let per_file = check_scripts(&godot, &jobs);
+        let key = |d: &Diagnostic| (d.line, d.code, d.message.clone());
+        for ((job, b), p) in jobs.iter().zip(&batched).zip(&per_file) {
+            let own = format!("res://{}", job.1);
+            let mut b: Vec<_> = b.as_ref().unwrap().iter().map(key).collect();
+            let mut p: Vec<_> = p
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|d| d.file == own || quoted_res_path(&d.message) == Some(own.as_str()))
+                .map(key)
+                .collect();
+            b.sort();
+            p.sort();
+            assert_eq!(b, p, "batched vs per-file differ for {}", job.1);
+        }
+        assert!(
+            batched
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|d| d.code.is_some()),
+            "the warning fixture must actually produce diagnostics"
         );
     }
 

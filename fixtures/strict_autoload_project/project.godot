@@ -1,0 +1,17 @@
+; Minimal Godot project with an autoload singleton (ks-ev5ng). `user.gd` reads the
+; autoload by its global name, which Godot only resolves once the autoload list is
+; registered — something `--script` mode does after the main-loop script's `_init`
+; and `--check-only` never does at all. A strict check that reports
+; "Identifier not found: Bus" here has checked the script against a project that was
+; never really booted.
+
+config_version=5
+
+[application]
+
+config/name="gdstrict-strict-autoload"
+config/features=PackedStringArray("4.6")
+
+[autoload]
+
+Bus="*res://bus.gd"

@@ -463,6 +463,83 @@ fn check_strict_flags_variant_returning_globals() {
     );
 }
 
+/// ks-ev5ng bug 2, at the gate: a script that reads an autoload by its global name
+/// must be checked against a project whose autoloads are registered. Before the fix
+/// every such reference came back as a hard `Identifier not found: Bus` error (and,
+/// being an error, suppressed the warning pass for that file entirely).
+/// Skipped when no Godot is discoverable.
+#[test]
+fn check_strict_resolves_autoload_singletons() {
+    if gdstrict_strict::find_godot().is_none() {
+        eprintln!("no godot on PATH and $GODOT unset; skipping live strict check");
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/strict_autoload_project/user.gd");
+    let out = Command::new(bin())
+        .args(["check"])
+        .arg(&fixture)
+        .output()
+        .expect("run gdstrict");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Identifier not found"),
+        "autoload `Bus` must resolve; stderr: {stderr}"
+    );
+    // The fixture's deliberate untyped local proves the warning pass ran.
+    assert!(
+        stderr.contains("[strict:error] UNTYPED_DECLARATION"),
+        "warning pass must still run on the autoload-reading script; stderr: {stderr}"
+    );
+    assert_eq!(code(&out), 1, "stderr: {stderr}");
+}
+
+/// ks-ev5ng cost guard: strict must amortize Godot boots across files, not boot once
+/// per file per pass. With autoloads registered every boot pays for the project's
+/// autoloads (~2.7 s on keystone), so a per-file sweep of a large tree is ruinous.
+/// A fake Godot counts its analyzer boots; a tree with more files than the pool could
+/// cover at two boots per worker must still come in under that bound.
+#[cfg(unix)]
+#[test]
+fn check_strict_boots_godot_per_chunk_not_per_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("boot-count");
+    let counter = dir.join("boots.txt");
+    let fake = dir.join("fake-godot");
+    write(
+        &fake,
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in *--script*) echo boot >> '{}';; esac\nexit 0\n",
+            counter.display()
+        ),
+    );
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let project = dir.join("proj");
+    write(&project.join("project.godot"), "config_version=5\n");
+    let bound = 2 * gdstrict_strict::default_worker_count();
+    let files = bound + 10;
+    for i in 0..files {
+        write(&project.join(format!("s{i:03}.gd")), "extends Node\n");
+    }
+
+    let out = Command::new(bin())
+        .args(["check", "--quiet", "--godot"])
+        .arg(&fake)
+        .arg(&project)
+        .output()
+        .expect("run gdstrict");
+    let boots = fs::read_to_string(&counter)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    assert!(
+        (1..=bound).contains(&boots),
+        "{files} files took {boots} Godot boots; expected 1..={bound}; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Phase 2 acceptance (PLAN.md §3): the clean, fully-typed fixture project →
 /// `check` exits 0. Every declaration is typed and every access statically safe,
 /// so gdstrict's injected strict warning set produces nothing. This is the

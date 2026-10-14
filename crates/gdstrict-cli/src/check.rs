@@ -218,7 +218,7 @@ pub fn run(args: &CheckArgs) -> ExitCode {
 }
 
 /// A unit of strict work: the user-facing display path, the
-/// `(project_dir, script_rel)` pair [`gdstrict_strict::check_scripts`] consumes,
+/// `(project_dir, script_rel)` pair [`gdstrict_strict::check_scripts_batched`] consumes,
 /// and the severity profile resolved for this file's project (so each file's
 /// diagnostics are folded under its own project's `gdstrict.toml`).
 struct StrictJob {
@@ -265,8 +265,8 @@ fn strict_job_for(
 
 /// Run every collected strict job through the bounded concurrent pool, then fold the
 /// results into `report` **in job (file) order** so output and counts are deterministic
-/// regardless of which file's Godot run finished first. A failed/crashed job is recorded
-/// as an operational error for that file alone and never aborts the rest.
+/// regardless of which chunk's Godot run finished first. A failed/crashed run is recorded
+/// as an operational error for the files of that chunk alone and never aborts the rest.
 fn run_strict_jobs(godot: &Path, jobs: &[StrictJob], quiet: bool, report: &mut Report) {
     if jobs.is_empty() {
         return;
@@ -275,7 +275,9 @@ fn run_strict_jobs(godot: &Path, jobs: &[StrictJob], quiet: bool, report: &mut R
         .iter()
         .map(|j| (j.project_dir.clone(), j.script_rel.clone()))
         .collect();
-    let results = gdstrict_strict::check_scripts(godot, &work);
+    // Chunked batches, not one boot per file: every boot registers the project's
+    // autoloads, which a per-file sweep would pay for 2× per file (ks-ev5ng).
+    let results = gdstrict_strict::check_scripts_batched(godot, &work);
 
     for (job, result) in jobs.iter().zip(results) {
         let diags = match result {
